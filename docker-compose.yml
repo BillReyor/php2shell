@@ -1,0 +1,13 @@
+# php2shell demo — manual Docker run (run.sh does this automatically if no local PHP).
+#   docker compose up -d          # start vulnerable app on :8080
+#   python3 exploit/php2shell.py rce --port 8080 --save-path /tmp/sessdata
+services:
+  php:
+    image: php:8.4-cli
+    working_dir: /var/www/html
+    volumes:
+      - ./app:/var/www/html
+      - ./ini/zz-lab.ini:/usr/local/etc/php/conf.d/zz-lab.ini
+    command: sh -c "mkdir -p /tmp/sessdata && php -d session.save_path=/tmp/sessdata -S 0.0.0.0:8080"
+    ports:
+      - "8080:8080"
