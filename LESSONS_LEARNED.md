@@ -7,7 +7,7 @@
 
 ## Outcome in one paragraph
 
-~3 weeks of multi-session work. The public PoCs (Zer061 et al.) could not be made to work on
+~3 days of multi-session work. The public PoCs (Zer061 et al.) could not be made to work on
 the target's stock Apache prefork + mod_php config — source analysis showed their core
 primitive cannot survive request boundaries there. A different public chain (@alvarodh5) did
 work in a lab replica, but its stage-3 RCE failed on *stock* config for a subtle allocator
@@ -67,7 +67,7 @@ before trusting it on live.**
 
 ### 5. Turn assumptions into tests using app-stack replicas
 "Stock WordPress doesn't call `session_start()`, so planted objects survive to shutdown" was
-an *assumption* for weeks. A 30-minute WP replica install turned it into a tested fact — and
+an *assumption* for days. A 30-minute WP replica install turned it into a tested fact — and
 the same run confirmed alignment transfer on warmed heaps. Two of the three "big unknowns"
 for live porting were closed in one lab afternoon. **Rule: any claim about what the target's
 application does between parse and shutdown must be tested against a replica, not reasoned
@@ -118,7 +118,7 @@ couldn't. **Rule: re-derive every primitive against the target's actual SAPI/MPM
 public chains as starting hypotheses.**
 
 ### 2. Blind heap grooming without a model
-Weeks of "add fields / change sizes / try another arming shape" with no understanding of *why*
+days of "add fields / change sizes / try another arming shape" with no understanding of *why*
 stage 3 failed on stock config (it was a one-slot misalignment in the Zend-MM slot grid, caused
 by where the OOM lands relative to `memory_limit`). The moment we had source + interposer
 ground truth, the fix was a two-digit number (`pads=112`) found by a 5-minute scan.
