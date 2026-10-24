@@ -1,0 +1,90 @@
+# php2shell (CVE-2026-109618 / CVE-2026-109619) — Suricata/Snort-style rules
+# -----------------------------------------------------------------------------
+# PHP core session.upload_progress / RFC1867 handler abuse.
+#
+# Design notes (read before deploying):
+#   * These key on PROTOCOL-MANDATED structure the attacker cannot rename, not on
+#     PoC cosmetics (boundaries, User-Agents, markers like JACKALPOC). Do NOT add
+#     rules for those strings; they catch the public scripts and nothing else.
+#   * Written for Suricata 6.0+ sticky buffers (http.request_body,
+#     http.header_names, http.header). Request-body inspection requires
+#     `request-body-limit` large enough (>= 16kb) in suricata.yaml; the OOM
+#     producer bodies are ~100kb+, so raise it if you want rule 2000003 reliable.
+#   * HTTP detection assumes the app-layer http parser is enabled and (for TLS
+#     targets) that you have TLS interception or are matching at the proxy.
+# -----------------------------------------------------------------------------
+
+# --- REQUEST SIDE -----------------------------------------------------------
+
+# [HIGH] The upload-progress field name is required by the vulnerable code path
+# and is server-ini-fixed (default PHP_SESSION_UPLOAD_PROGRESS). Its presence in
+# a multipart POST body is the single most evasion-resistant attempt signal.
+alert http any any -> $HTTP_SERVERS any ( \
+    msg:"PHP2SHELL session.upload_progress field in multipart POST (CVE-2026-109618/19 attempt)"; \
+    flow:established,to_server; \
+    http.method; content:"POST"; \
+    http.content_type; content:"multipart/form-data"; nocase; \
+    http.request_body; content:"name=|22|PHP_SESSION_UPLOAD_PROGRESS|22|"; nocase; \
+    classtype:web-application-attack; \
+    reference:url,calif.io/php2shell/; \
+    metadata:cve CVE-2026-109618, cve CVE-2026-109619, confidence High; \
+    sid:2000001; rev:1; )
+
+# [HIGH] Cookie-less session-ID injection: PHPSESSID carried as a FORM FIELD in
+# the body with NO Cookie header. Normal clients send the SID in a cookie.
+# Pairing with the progress field (rule 2000001) makes this near-dispositive.
+alert http any any -> $HTTP_SERVERS any ( \
+    msg:"PHP2SHELL cookie-less PHPSESSID form-field injection (CVE-2026-109618/19)"; \
+    flow:established,to_server; \
+    http.method; content:"POST"; \
+    http.content_type; content:"multipart/form-data"; nocase; \
+    http.request_body; content:"name=|22|PHPSESSID|22|"; nocase; \
+    http.request_body; content:"name=|22|PHP_SESSION_UPLOAD_PROGRESS|22|"; nocase; \
+    http.header_names; content:!"Cookie"; nocase; \
+    classtype:web-application-attack; \
+    reference:url,calif.io/php2shell/; \
+    metadata:cve CVE-2026-109618, cve CVE-2026-109619, confidence High; \
+    sid:2000002; rev:1; )
+
+# [MED] OOM producer (the official calif chain, request A): deeply bracket-nested
+# empty-file parts (files0[a][b]..., filename=""). Matches the nesting shape plus
+# the progress field; part-count thresholds are better enforced at a WAF.
+alert http any any -> $HTTP_SERVERS any ( \
+    msg:"PHP2SHELL OOM producer: nested empty-file multipart flood (CVE-2026-109619 setup)"; \
+    flow:established,to_server; \
+    http.method; content:"POST"; \
+    http.content_type; content:"multipart/form-data"; nocase; \
+    http.request_body; content:"name=|22|PHP_SESSION_UPLOAD_PROGRESS|22|"; nocase; \
+    http.request_body; content:"filename=|22 22|"; \
+    http.request_body; pcre:"/name=\x22files\d+(?:\[[a-z]+\]){2,}/i"; \
+    classtype:web-application-attack; \
+    reference:url,calif.io/php2shell/; \
+    metadata:cve CVE-2026-109619, confidence Medium; \
+    sid:2000003; rev:1; )
+
+# [MED] Weaponized tail: forged zend_fcall_info / fake structures carry the ASCII
+# command primitive inside a multipart form value. Low-FP token is "system\x00"
+# sitting next to the upload-progress field in the body.
+alert http any any -> $HTTP_SERVERS any ( \
+    msg:"PHP2SHELL forged call primitive (system) in upload-progress multipart body"; \
+    flow:established,to_server; \
+    http.request_body; content:"name=|22|PHP_SESSION_UPLOAD_PROGRESS|22|"; nocase; \
+    http.request_body; content:"system|00|"; \
+    classtype:attempted-admin; \
+    reference:url,calif.io/php2shell/; \
+    metadata:cve CVE-2026-109618, confidence Medium; \
+    sid:2000004; rev:1; )
+
+# --- RESPONSE SIDE ----------------------------------------------------------
+
+# [VERY HIGH] In-band ASLR leak: heap/libphp pointers exfiltrated through an
+# oversized Set-Cookie: PHPSESSID= value. A real PHP session id is 26/32 chars;
+# a URL-encoded value of 80+ bytes is an invariant of the disclosure primitive.
+alert http $HTTP_SERVERS any -> any any ( \
+    msg:"PHP2SHELL heap/libphp pointer leak via oversized Set-Cookie PHPSESSID (CVE-2026-109618)"; \
+    flow:established,to_client; \
+    http.header; pcre:"/^Set-Cookie:\s*PHPSESSID=[^\r\n;]{80,}/Hmi"; \
+    classtype:web-application-attack; \
+    reference:url,calif.io/php2shell/; \
+    metadata:cve CVE-2026-109618, confidence High; \
+    sid:2000005; rev:1; )

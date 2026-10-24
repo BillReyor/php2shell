@@ -1,0 +1,61 @@
+title: PHP Worker Spawning Shell or Interpreter (php2shell RCE end-state)
+id: 7b1d9c2e-0a4f-4e3a-9b61-1f2c3d4e5a6b
+status: experimental
+description: |
+    Detects a PHP web worker (php, php-fpm, mod_php under apache/httpd/nginx)
+    spawning a shell or scripting interpreter. This is the vector-independent
+    success state of the php2shell chain (CVE-2026-109618 / CVE-2026-109619):
+    whatever leak/forge path the attacker used, pre-auth RCE ends in the PHP
+    worker executing a command. Co-primary detection with the request-side rules
+    because it survives every in-band evasion (display_errors off, memory_limit=-1,
+    suppressed logs).
+references:
+    - https://calif.io/php2shell/
+    - https://www.php.net/archive/2026.php
+author: php2shell detections
+date: 2026/10/24
+tags:
+    - attack.execution
+    - attack.t1059
+    - attack.t1190
+    - cve.2026.109618
+    - cve.2026.109619
+logsource:
+    category: process_creation
+detection:
+    parent:
+        ParentImage|endswith:
+            - '/php'
+            - '/php-fpm'
+            - '/httpd'
+            - '/apache2'
+            - '/nginx'
+        # Windows / mod_php-on-apache variants
+    parent_win:
+        ParentImage|endswith:
+            - '\php.exe'
+            - '\php-cgi.exe'
+            - '\httpd.exe'
+    child:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/dash'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/perl'
+            - '/ruby'
+            - '/node'
+            - '\cmd.exe'
+            - '\powershell.exe'
+    condition: (parent or parent_win) and child
+fields:
+    - ParentImage
+    - Image
+    - CommandLine
+    - User
+falsepositives:
+    - Legitimate PHP apps that shell out (imagemagick wrappers, deploy hooks,
+      queue workers). Baseline per host and allowlist known command lines.
+level: high

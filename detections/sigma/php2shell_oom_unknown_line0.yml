@@ -1,0 +1,48 @@
+title: PHP Memory Exhaustion in Unknown on line 0 (php2shell OOM trigger)
+id: 2c6a4f71-9d83-4b2e-8c10-5a6b7c8d9e0f
+status: experimental
+description: |
+    Detects the PHP fatal emitted when the OOM producer exhausts memory_limit
+    DURING multipart request-body parsing — before module activation — leaving
+    "Allowed memory size of N bytes exhausted ... in Unknown on line 0". This is
+    the setup step of CVE-2026-109619 (the calif chain) and CVE-2026-109618.
+
+    IMPORTANT — this is a CORROBORATING signal only, not a primary detection:
+      * Defeated by the official partial mitigation memory_limit=-1 (no OOM, no
+        line) — so absence of this event does NOT mean the host is safe.
+      * The weaponized chain deliberately avoids it: it can OOM quietly inside
+        php_session_send_cookie with headers_sent=0 and works with
+        display_errors=0 (see ninebie/DISPLAY_ERRORS_OFF.md), emitting no warning.
+      * Legitimate OOMs produce the identical string — tune by source/endpoint.
+    Correlate with the request-side rules and the webshell-spawn rule.
+references:
+    - https://calif.io/php2shell/
+    - https://www.php.net/archive/2026.php
+author: php2shell detections
+date: 2026/10/24
+tags:
+    - attack.impact
+    - attack.t1499
+    - cve.2026.109619
+    - cve.2026.109618
+logsource:
+    product: php
+    service: php_error
+    # Route PHP error_log / FPM error log to your SIEM. If you only have a
+    # generic file pipeline, match the same strings in the application category.
+detection:
+    exhausted:
+        - 'Allowed memory size of'
+    location:
+        - 'exhausted'
+    unknown:
+        - 'in Unknown on line 0'
+    condition: exhausted and location and unknown
+fields:
+    - Message
+    - host
+    - request_uri
+falsepositives:
+    - Genuine memory exhaustion from heavy pages or imports.
+    - Memory-bomb scanners unrelated to this CVE.
+level: medium
