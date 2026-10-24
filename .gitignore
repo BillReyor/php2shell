@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Run logs written by exploit.py into the repo root when run from a clone
+# (evidence/ holds curated, sanitized logs and is NOT ignored)
+/live_run_*.log

