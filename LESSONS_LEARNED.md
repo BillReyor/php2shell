@@ -215,10 +215,21 @@ the patch changes, and detection guidance.
   nearly all small allocations; interpose the whole family or your ground truth is blind.
 - **The 8.5.12 patch** adds early session-globals clearing at `MULTIPART_EVENT_START` and aborts
   parsing at max_input_vars overflow — stage 1 of this chain dies immediately on it (no leak).
-- **Adjacent vulnerable versions share geometry.** The php-src diff between 8.5.10 and 8.5.11 is
-  clean in everything that shapes this chain (zend allocator, RFC1867 parsing, session struct
-  layouts); porting cost was exactly two nm lookups (`zif_system`, `zval_ptr_dtor`) plus one
-  replica, with HTDATA/PADS unchanged — confirmed by self-validating RCE on both carriers.
+- **Adjacent vulnerable versions share geometry — but not always calibration.** The php-src
+  diffs between 8.5.9/8.5.10/8.5.11 are clean in everything that shapes this chain (zend
+  allocator, RFC1867 parsing, session struct layouts), and HTDATA/HTDATA_EXT carried over
+  unchanged across all three. But the .9→.10 patch release changed unrelated RINIT-time heap
+  consumption enough to shift the OOM landing point by one bin-3 slot: on 8.5.9 the dangling
+  reference sits at k≡5 mod 7 (dead) where .10/.11 sit at k≡6, and stage 3 misses silently.
+  Porting cost is therefore two nm lookups + one replica + a stage-3 smoke test; if it misses,
+  one interposer measurement of the reference slot index gives the exact pad fix (each pad
+  shifts k by +4). Never assume calibration transfers — verify behaviorally.
+- **`ps_globals` is an exported symbol in libphp** (`nm | grep " ps_globals$"`) — the
+  interposer's PS-tracking offset re-derives with one nm lookup per build (8.5.11: 0x01771a40,
+  8.5.9: 0x01770a40). No code archaeology needed.
+- **Never compare leak/interposer values across an apache restart.** The address-space layout
+  rolls with the master process; a stage-2 "wrong pointer" that turned out to be correct was
+  simply measured in a different post-restart layout. Re-measure both sides in the same run.
 - **`zif_system` is a local symbol** in the official `php:8.5.x-apache` image builds (lowercase
   `t`); only full `nm` finds it, not `nm -D`. Expect the same for other internal Zend functions.
 - **Lab architecture must be pinned.** On Apple Silicon, Docker/OrbStack defaults to aarch64;

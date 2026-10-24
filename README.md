@@ -4,16 +4,17 @@ Demonstration and reproduction kit for **full unauthenticated remote code execut
 against a stock WordPress site running **PHP 8.5.x x86_64** under Apache prefork +
 mod_php, with ASLR enabled — via CVE-2026-109618 / CVE-2026-109619 (the "php2shell"
 memory-safety bugs in PHP core's RFC 1867 multipart path). Version profiles are
-shipped for **8.5.11 and 8.5.10**; the target's version is auto-detected from
+shipped for **8.5.9, 8.5.10 and 8.5.11**; the target's version is auto-detected from
 `X-Powered-By` (override with `--version`).
 
 The chain was executed against an authorized live target on PHP 8.5.11 and succeeded
 on the first cycle, every stage on attempt 1 (~33 s end-to-end; proof:
-`uid=33(www-data)` served by Apache — see [`evidence/`](evidence/)). The same chain,
-with only two per-build offsets re-derived, was reproduced in-lab against a PHP
-8.5.10 replica on cycle 1 (both carrier types). It is HTTP-only (no debugger, no
-`/proc`, no binary blobs) and reproducible against any matching target you own or are
-explicitly permitted to test.
+`uid=33(www-data)` served by Apache — see [`evidence/`](evidence/)). The same chain was
+reproduced in-lab against stock WordPress replicas of PHP **8.5.10** (only the two
+per-build offsets re-derived) and **8.5.9** (offsets plus a one-slot arming
+calibration shift — see the worked example below), each on cycle 1, both carrier
+types. It is HTTP-only (no debugger, no `/proc`, no binary blobs) and reproducible
+against any matching target you own or are explicitly permitted to test.
 
 ## Target requirements
 
@@ -21,7 +22,7 @@ The chain is calibrated for one specific environment. All of the following must 
 
 | Requirement | Why it matters |
 |---|---|
-| **PHP 8.5.x, x86_64** — profiles shipped: 8.5.10, 8.5.11 (stock `php:8.5.x-apache` image builds) | libphp offsets (`ZIF`, `DTOR`) are nm-derived per build; a different build fails safely at stage 2's dtor gate instead of firing blind. Note `zif_system` is a *local* symbol in these builds — use full `nm`, not just `nm -D` (see the adaptation section) |
+| **PHP 8.5.x, x86_64** — profiles shipped: 8.5.9, 8.5.10, 8.5.11 (stock `php:8.5.x-apache` image builds) | libphp offsets (`ZIF`, `DTOR`) are nm-derived per build; a different build fails safely at stage 2's dtor gate instead of firing blind. Note `zif_system` is a *local* symbol in these builds — use full `nm`, not just `nm -D` (see the adaptation section) |
 | **Apache prefork + mod_php** | RCE depends on the OOM'd worker *surviving* and being reused (PHP-FPM exits the worker → DoS only) |
 | **`memory_limit=128M`** (stock default) | arming size (`HUGE_MB=140`) and pad calibration (`PADS=112`) are tuned to this value; other values need re-calibration (the math is in [LESSONS_LEARNED.md](LESSONS_LEARNED.md)) |
 | **`session.upload_progress.enabled=On`** (default) | the vulnerable handler |
@@ -159,7 +160,7 @@ What changes per target, and how:
 |---|---|---|
 | `ZIF` / `DTOR` offsets | the **build** (not even the version) | derive from the target binary: `nm -D /usr/lib/apache2/modules/libphp.so \| grep -E 'zif_system\|zval_ptr_dtor'` (or parse the ELF symbol tables; @alvarodh5's original multi-version PoC ships such an auto-derive mode). The stage-2 dtor gate rejects a wrong build before any code runs |
 | Stage 1–2 leaks | version + SAPI | **self-validating**: run them first against any candidate target. A valid clustered heap leak and a gated libphp leak mean the ASLR bypass works on that build, no further assumptions needed |
-| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (LD_PRELOAD interposer); this is the per-version work. Known status: **8.5.11 RCE OK** (this repo, live + lab), **8.5.10 RCE OK** (this repo, lab — see worked example below), 8.4.26 RCE OK (@alvarodh5's chain), 8.3.35 leak-only (stage-3 geometry pending), 8.2.34 pending, arm64 partial |
+| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (LD_PRELOAD interposer); this is the per-version work. Known status: **8.5.11 RCE OK** (this repo, live + lab), **8.5.10 RCE OK** and **8.5.9 RCE OK** (this repo, lab — see worked example below), 8.4.26 RCE OK (@alvarodh5's chain), 8.3.35 leak-only (stage-3 geometry pending), 8.2.34 pending, arm64 partial |
 | Arming calibration (`PADS`) | `memory_limit` + arming shape | the dangling slot index must satisfy `k ≡ 6 mod 7`; pad count shifts `k` by a measured constant — scan once per target config (minutes), don't brute-force payloads |
 
 ### Worked example: porting to PHP 8.5.10 (what actually changed)
@@ -187,9 +188,28 @@ is clean in everything that shapes this chain: `zend_list.h` / `zend_hash.h` /
    interposer re-measurement of the carrier offsets unnecessary — if stage 3 had missed,
    the interposer in [`tools/interposer/`](tools/interposer/) is how you find out why.
 
-Net cost for an adjacent vulnerable version: **two nm lookups + one replica**, no source
-decoding, no re-calibration. Versions further apart (8.4.x, 8.3.x) need the full
-diff-and-decode path because their struct layouts and allocator behavior differ.
+### Second data point: PHP 8.5.9 — where calibration, not geometry, moved
+
+Porting to 8.5.9 followed the same procedure, with one twist worth knowing about:
+
+1. **Source diff again clean** for everything that shapes the chain (RFC1867 parsing,
+   allocator, struct layouts all identical to 8.5.10); the .9→.10 release is a normal
+   bugfix patch across unrelated extensions.
+2. Offsets re-derived: `zif_system` 0x598160, `zval_ptr_dtor` 0x7b29a0. Stages 1–2
+   validated on attempt 1 (the stage-2 pointer resolved to exactly `base + zval_ptr_dtor`).
+3. **Stage 3 missed with the carried-over `PADS=112`.** Interposer ground truth showed why:
+   unrelated RINIT-time heap consumption changed between .9 and .10, shifting where the
+   OOM lands during arming by one bin-3 slot — the dangling reference moved from k=76
+   (≡ 6 mod 7, aligned) to **k=75 (≡ 5, dead)**: no recycled 56 B slot can place its data
+   region at `ref − 24`, so the reclaim is geometrically impossible regardless of payload.
+   The fix was a two-pad bump: **`PADS=114` → k=83 (≡ 6)**, after which both carriers RCE'd
+   on cycle 1 with `HTDATA`/`HTDATA_EXT` unchanged.
+
+So the honest net cost for an adjacent vulnerable version is: **two nm lookups + one
+replica, plus a stage-3 smoke test** — and if that misses, one interposer measurement of
+the reference slot index (k mod 7) tells you exactly which pad count to try. Versions
+further apart (8.4.x, 8.3.x) need the full diff-and-decode path because their struct
+layouts and allocator behavior differ.
 
 Recommended procedure for a new version: build an exact replica first (same image, same
 app stack), instrument with the interposer for allocator ground truth, decode the trigger
@@ -208,6 +228,10 @@ untested signal mechanisms, over-engineered pinning) — is in
 - **the 8.5.10 lab reproduction** — full chain (auto-detected profile) against a stock
   WordPress replica on PHP 8.5.10 x86_64: cycle 1, both carrier types; log is
   localhost-only by construction.
+- **the 8.5.9 lab reproduction** (`lab_8509_rce.log`) — full chain against a stock
+  WordPress replica on PHP 8.5.9 x86_64: cycle 1, both carrier types; uses the
+  re-calibrated `PADS=114` (see worked example). Preflight shows `GET /p` → 404,
+  post-exploit → 200 with `uid=33(www-data)`.
 - **the patched-build control** — the same chain against PHP **8.5.12**: no leak on any
   attempt (8.5.12 also aborts parsing at `max_input_vars` overflow before reaching the
   OOM field). The official patch closes this RCE.
