@@ -57,15 +57,11 @@ Credit where credit is due — in order of how directly they enabled this work.
 
 ## Development of this project
 
-- **Bill** — project owner and operator: target authorization, live-target access,
-direction, and final review of all results.
 - **Qwen3.8 27B Abliterated by HuiHui** — AI research assistant (running in LM Studio
   Bionic): the exploit development across this effort — source-level mechanism decoding,
   interposer-based allocator ground truth, slot-grid calibration (`pads=112`), keep-alive
 targeting design and validation, extended-carrier measurement, authorized live-target
-  execution, and this repository's documentation. All work performed at Bill's direction,
-  against explicitly authorized targets only.
-
+  execution, and this repository's documentation.
 ## Disclaimer
 
 All code here is for **lawful, authorized** security assessment, research and education only.
