@@ -215,6 +215,19 @@ the patch changes, and detection guidance.
   nearly all small allocations; interpose the whole family or your ground truth is blind.
 - **The 8.5.12 patch** adds early session-globals clearing at `MULTIPART_EVENT_START` and aborts
   parsing at max_input_vars overflow — stage 1 of this chain dies immediately on it (no leak).
+- **Adjacent vulnerable versions share geometry.** The php-src diff between 8.5.10 and 8.5.11 is
+  clean in everything that shapes this chain (zend allocator, RFC1867 parsing, session struct
+  layouts); porting cost was exactly two nm lookups (`zif_system`, `zval_ptr_dtor`) plus one
+  replica, with HTDATA/PADS unchanged — confirmed by self-validating RCE on both carriers.
+- **`zif_system` is a local symbol** in the official `php:8.5.x-apache` image builds (lowercase
+  `t`); only full `nm` finds it, not `nm -D`. Expect the same for other internal Zend functions.
+- **Lab architecture must be pinned.** On Apple Silicon, Docker/OrbStack defaults to aarch64;
+  x86_64 exploit labs need `--platform linux/amd64` explicitly. A native-ARM container runs the
+  app fine and masks the mismatch until an x86_64 binary (e.g. an LD_PRELOAD interposer) must load
+  inside it — and glibc 2.41 reports a wrong-machine preload as "cannot open shared object file"
+  even though strace shows `openat` succeeding (the ELF machine check fails afterwards).
+- **Docker regenerates `/etc/hosts` on every restart**, wiping manual entries; use
+  `--add-host name:ip` at creation for cross-container resolution that survives.
 
 ## Operational & ethical notes
 
