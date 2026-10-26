@@ -78,6 +78,7 @@ catches attempts against *any* public PoC variant of this family, not just this 
 | User-Agent / Accept headers | absent (bare socket) | browser-like, rotating order | UA-absence rules broken |
 | Header order | consistent | rotates between layouts | order-based rules broken |
 | Preflight/proof GETs | no UA | UA-bearing | same as above |
+| `PHPSESSID` field value | fixed per tool (e.g. `attacksessionid0001` in the foundation PoC) | random, **same length** under `--evasive` | constant-value matching broken; presence + structure intact |
 | **Field names** (sequential numeric fillers, `PHPSESSID`, `PHP_SESSION_UPLOAD_PROGRESS`) | fixed | **unchanged — structural** | ✅ name-pattern rules still work |
 | **Part counts / sizes / body shape** | fixed | **unchanged — calibrated** | ✅ size/shape rules still work |
 | **Arming upload > memory_limit** | ~128 MB+ chunked | **unchanged — it is the trigger** | ✅ size rule still works |

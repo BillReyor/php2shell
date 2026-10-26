@@ -171,10 +171,13 @@ Consequences for triage (consistent with the advisory's "no complete mitigations
 `--evasive` randomizes per-request fingerprints that honeypots/WAFs use to cluster this
 attack family (fixed decoded-body hashes, absent User-Agent, repeated boundaries, consistent
 header order): multipart boundary **content** at identical lengths, browser-like headers with
-rotating order, and UA-bearing preflight GETs. Both changes are layout-neutral — validated
-end-to-end in-lab and live (2026-10-26). What it deliberately does **not** change: field
-names (numeric names register as integer hash keys; stringifying them perturbs the calibrated
-heap pattern and kills the leak), part counts/sizes, or anything structural.
+rotating order, UA-bearing preflight GETs, and the `PHPSESSID` field **value** in stage-1/2
+follow-ups — random content at a fixed length (the value is stored by PHP without validation
+and never becomes the live session id, so only its *length* matters to the exploit). All of
+these are layout-neutral — validated end-to-end in-lab and live (2026-10-26), including both
+carrier types on 8.5.3 and 8.5.11 with randomized SIDs. What it deliberately does **not**
+change: field names (numeric names register as integer hash keys; stringifying them perturbs
+the calibrated heap pattern and kills the leak), part counts/sizes, or anything structural.
 
 Evasion cannot hide what the exploit *is*: a >`memory_limit` chunked multipart upload that
 OOMs the worker, followed by an oversized `Set-Cookie`. Defenders: see
