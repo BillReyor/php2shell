@@ -35,6 +35,13 @@ static unsigned long long get_libphp_base(void) {
     return base;
 }
 
+/* File offset of the ps_globals symbol inside libphp.so. Build-specific:
+ * re-derive per target build with `nm /usr/lib/apache2/modules/libphp.so | grep -w ps_globals`
+ * and pass -DPSG_OFF=0x... at compile time (default: php:8.5.11-apache). */
+#ifndef PSG_OFF
+#define PSG_OFF 0x01771a40ULL
+#endif
+
 static void ps_dump(void) {
     static unsigned last_id_type = 0xFFFFFFFFu, last_hs_type = 0xFFFFFFFFu;
     static unsigned long long last_id_ptr = 0, last_hs_ptr = 0;
@@ -42,15 +49,45 @@ static void ps_dump(void) {
     init_log();
     if (!logf) return;
     unsigned long long base = get_libphp_base();
-    if (dbg == 0) { dbg = 1; fprintf(logf, "DBG libphp_base=0x%llx\n", base); }
+    if (dbg == 0) { dbg = 1; fprintf(logf, "DBG libphp_base=0x%llx psg_off=0x%llx\n", base, (unsigned long long)PSG_OFF); }
     if (!base) return;
-    volatile char *psg = (volatile char *)(base + 0x01771a40);   /* &ps_globals */
+    volatile char *psg = (volatile char *)(base + PSG_OFF);   /* &ps_globals */
     unsigned long long id_ptr = *(unsigned long long *)(psg + 16);
     unsigned long long hs_ref = *(unsigned long long *)(psg + 360);
     unsigned int hs_type = *(unsigned int *)(psg + 360 + 8);
     if (id_ptr != last_id_ptr) {
-        fprintf(logf, "PS id=0x%llx\n", (unsigned long long)id_ptr);
+        /* Dump the OLD value's block content on every PS(id) change — this is
+         * what a subsequent Set-Cookie emission would read from it. */
+        if (last_id_ptr && last_id_ptr < 0x800000000000ULL) {
+            volatile unsigned char *p = (volatile unsigned char *)last_id_ptr;
+            fprintf(logf, "PS id=0x%llx old@0x%llx:", (unsigned long long)id_ptr,
+                    (unsigned long long)last_id_ptr);
+            for (int i = 0; i < 64; i++) fprintf(logf, "%02x", p[i]);
+            fprintf(logf, "\n");
+        } else {
+            fprintf(logf, "PS id=0x%llx\n", (unsigned long long)id_ptr);
+        }
         last_id_ptr = id_ptr; last_id_type = 0xFFFFFFFFu;
+    }
+    /* ---- stage-2 slot monitor -------------------------------------------
+     * Watch the pDestructor slot of the per-part HashTable that lands at
+     * PS(id)-0x10 (its +0x30 field == PS(id)+0x20, i.e. cookie byte 8..15).
+     * Log every change with the full 56-byte table block so we can see WHEN
+     * and AFTER WHICH ALLOCATION EVENT the value differs from zval_ptr_dtor.
+     * Runs on every hooked call; only logs on change (cheap). */
+    if (id_ptr && id_ptr < 0x800000000000ULL) {
+        static unsigned long long last_slot = 0;
+        static int slot_init = 0;
+        volatile char *xb = (volatile char *)(id_ptr - 0x10);
+        unsigned long long slotv = *(unsigned long long *)(id_ptr + 0x20);
+        if (!slot_init || slotv != last_slot) {
+            slot_init = 1; last_slot = slotv;
+            fprintf(logf, "SLOT @0x%llx val=0x%llx rel=0x%llx block@PS-0x10:",
+                    (unsigned long long)(id_ptr + 0x20), (unsigned long long)slotv,
+                    base ? (unsigned long long)(slotv - base) : 0ULL);
+            for (int i = 0; i < 56; i++) fprintf(logf, "%02x", xb[i]);
+            fprintf(logf, "\n");
+        }
     }
     if (hs_ref != last_hs_ptr || hs_type != last_hs_type) {
         fprintf(logf, "PS http_session_vars type=%u ref=0x%llx\n", hs_type, (unsigned long long)hs_ref);
@@ -172,3 +209,53 @@ HOOK_EMALLOC(1792)  HOOK_EFREE(1792)
 HOOK_EMALLOC(2048)  HOOK_EFREE(2048)
 HOOK_EMALLOC(2560)  HOOK_EFREE(2560)
 HOOK_EMALLOC(3072)  HOOK_EFREE(3072)
+
+/* ---- stage-2 write-source bisect: wrap session/URL-encode path ----------
+ * Built to hunt a suspected pDestructor corruption on PHP 8.5.3 (the slot
+ * appeared to hold zval_ptr_dtor+11). Verdict after the PRE/POST dumps below:
+ * NOTHING corrupts anything — the slot holds exactly zval_ptr_dtor at read
+ * time, and php_url_encode's input already contains the exact pointer bytes.
+ * The apparent +11 was a client-side cookie-decode bug: this build's dtor
+ * offset ends in 0x20 (space), which php_url_encode emits as '+', and our
+ * parser left '+' undecoded. Kept for future slot/encoder forensics. */
+static unsigned long long slot_now(void) {
+    unsigned long long base = get_libphp_base();
+    if (!base) return 0;
+    volatile char *psg = (volatile char *)(base + PSG_OFF);
+    unsigned long long id_ptr = *(unsigned long long *)(psg + 16);
+    if (!id_ptr || id_ptr >= 0x800000000000ULL) return 0;
+    return *(unsigned long long *)(id_ptr + 0x20);
+}
+
+void *php_url_encode(const char *str, size_t len) {
+    static void *(*real)(const char *, size_t) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "php_url_encode");
+    init_log(); ps_dump();
+    if (logf) {
+        fprintf(logf, "PRE urlenc str=%p len=%zu slot=0x%llx in16:",
+                (void *)str, len, slot_now());
+        for (size_t i = 0; i < len && i < 16; i++) fprintf(logf, "%02x", (unsigned char)str[i]);
+        if (len > 16) fprintf(logf, "...");
+        fprintf(logf, "\n");
+    }
+    void *r = real(str, len);
+    if (logf && r) {
+        /* zend_string: gc@0(8B), h@8(u64), len@16(u64), val@24 */
+        unsigned long long elen = *(unsigned long long *)((char *)r + 16);
+        volatile unsigned char *ev = (volatile unsigned char *)r + 24;
+        fprintf(logf, "POST urlenc result len=%llu bytes:", (unsigned long long)elen);
+        for (unsigned long long i = 0; i < elen && i < 60; i++) fprintf(logf, "%02x", ev[i]);
+        fprintf(logf, "\n");
+    }
+    return r;
+}
+
+int php_session_reset_id(void) {
+    static int (*real)(void) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "php_session_reset_id");
+    init_log(); ps_dump();
+    if (logf) fprintf(logf, "PRE reset_id slot=0x%llx\n", slot_now());
+    int r = real();
+    if (logf) fprintf(logf, "POST reset_id rc=%d slot=0x%llx\n", r, slot_now());
+    return r;
+}
