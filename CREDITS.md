@@ -55,6 +55,12 @@ Credit where credit is due — in order of how directly they enabled this work.
 - **eness** — [heap-UAF PoC variant](https://github.com/eness/php2shell-CVE-2026-109618-CVE-2026-109619-PoC)
   of the same handler; ships equivalent WAF/ModSecurity rules.
 
+- **KillaBoi** — [StealMyBitcoin-PoC](https://github.com/KillaBoi/StealMyBitcoin-PoC): independent live
+  exploitation (2026-10-25) against PHP 8.4.26 cli-server in a CTF context, using a different OOM
+  vector (nested array names triggering `max_input_nesting_level`, ~250 KB wire size vs this project's
+  ~128 MB arming). Corroborates the finding that client-visible error output during arming is what
+  opens the leak channel.
+
 ## Development of this project
 
 - **Qwen3.8 27B Abliterated by HuiHui** — AI research assistant (running in LM Studio
