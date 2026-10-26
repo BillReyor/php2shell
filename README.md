@@ -6,12 +6,12 @@ CVE-2026-109618 / CVE-2026-109619 ("php2shell") — memory-safety bugs in PHP co
 RFC 1867 multipart path.
 
 **Status.** Full RCE demonstrated against an authorized live target (PHP 8.5.11, every
-stage on attempt 1, ~33 s) and reproduced in-lab on stock WordPress replicas of
-**8.5.9 / 8.5.10 / 8.5.11**. Profiles ship for the entire vulnerable series
-(**8.5.0 – 8.5.11**; fixed in **8.5.12**). Unvalidated profiles self-validate through
-stages 1–2 (leak checks with build gates) before stage 3 can run, so a mismatched build
-fails safely instead of firing blind. The chain is HTTP-only: no debugger, no `/proc`,
-no binary blobs.
+stage on attempt 1, ~33 s) and reproduced in-lab on stock replicas of **every release in
+the vulnerable series — 8.5.0 through 8.5.11 — except 8.5.3**, which is stage-1 leak-only
+(no gated stage-2 overlap with any tested arming shape; see the PROFILES comment). Fixed
+in **8.5.12**. Every profile self-validates through stages 1–2 (leak checks with build
+gates) before stage 3 can run, so a mismatched build fails safely instead of firing blind.
+The chain is HTTP-only: no debugger, no `/proc`, no binary blobs.
 
 ## Target requirements
 
@@ -19,7 +19,7 @@ The chain is calibrated for one specific environment — all rows must match:
 
 | Requirement | Why it matters |
 |---|---|
-| **PHP 8.5.x x86_64** (stock `php:8.5.x-apache` builds; full-series profiles, .9/.10/.11 validated to RCE here) | libphp offsets are nm-derived per build; a mismatched build fails at stage 2's dtor gate instead of firing blind |
+| **PHP 8.5.x x86_64** (stock `php:8.5.x-apache` builds; every release validated to RCE except 8.5.3 — leak-only) | libphp offsets are nm-derived per build and were gate-validated against each real build in the series sweep; a mismatched build fails at stage 2's dtor gate instead of firing blind |
 | **`display_errors=On`** (or equivalent early output) | required for the leak channel — with `Off`, no leak and no RCE (DoS only). [Why](#why-display_errorson-is-required-and-why-off-is-not-a-mitigation) |
 | **Apache prefork + mod_php** | RCE needs the OOM'd worker to survive and be reused; PHP-FPM exits it (DoS only) |
 | **`memory_limit=128M`** (stock default) | arming size and pad calibration are tuned to this value; other values need re-calibration ([LESSONS_LEARNED.md](LESSONS_LEARNED.md)) |
@@ -185,7 +185,7 @@ that work regardless of `--evasive`.
 |---|---|---|
 | `ZIF` / `DTOR` offsets | the **build** (not even the version) | derive from the target binary: full `nm` on `libphp.so` (`zif_system` is a *local* symbol — `nm -D` misses it). The stage-2 dtor gate rejects a wrong build before any code runs |
 | Stage 1–2 leaks | version + SAPI | **self-validating**: run them first against any candidate target; a clustered heap leak + gated libphp leak means the ASLR bypass works on that build |
-| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (interposer). Status: **8.5.9/.10/.11 RCE OK** (this repo); 8.5.0–.8 ship derived offsets + series-wide geometry, unvalidated — run stages 1–2 first; 8.4.26 RCE OK (@alvarodh5's chain) |
+| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (interposer). Status: **every release in the vulnerable series RCE-OK** (this repo, cycle 1) except **8.5.3 = stage-1 leak-only**; 8.4.26 RCE OK (@alvarodh5's chain) |
 | Arming calibration (`PADS`) | `memory_limit` + arming shape | the dangling slot index must satisfy `k ≡ 6 mod 7`; pad count shifts `k` by a measured constant — scan once per target config (minutes), don't brute-force payloads |
 
 **Worked data points.** Porting to **8.5.10** cost exactly two nm lookups: the php-src diff
@@ -213,6 +213,10 @@ need the full diff-and-decode path; the complete playbook is in
   cycle 1, both carrier types (localhost-only by construction);
 - **the 8.5.9 lab reproduction** (`lab_8509_rce.log`) — full chain on PHP 8.5.9 with the
   re-calibrated `PADS=114`: cycle 1, both carriers; preflight `/p` → 404, post-exploit → 200;
+- **the full-series sweep** (`lab_850_series_sweep.log`) — every release 8.5.0–8.5.8 run
+  against a replica of its stock build (x86_64 + ASLR): stage-1 leak on all nine, gated
+  stage-2 libphp leak and cycle-1 RCE on eight of them; **8.5.3 is the sole exception**
+  (stage-2 overlap never materializes — see the PROFILES comment for the fill-size scan);
 - **the patched-build control** — same chain against PHP **8.5.12**: no leak on any attempt
   (8.5.12 also aborts parsing at `max_input_vars` overflow before reaching the OOM field).
   The official patch closes this RCE.
