@@ -243,6 +243,15 @@ for CVE-2026-109618, `session.upload_progress.enabled=0` (and on 8.5,
 `fatal_error_backtraces=0`) for CVE-2026-109619, or rejecting `multipart/form-data` at the
 proxy (breaks uploads).
 
+**Scope note.** That fix closes *this* chain family (CVE-2026-109618/19). Third-party
+research published around the same time reports other surviving PHP bug classes that can
+reach RCE on patched builds **where an application exposes a pre-auth unserialize or
+session-decode surface** — stock WordPress core does not expose one (its HTTP write paths
+carry a double-serialize guard and it ships no usable destructor gadget; independently
+mapped in [acd421/php](https://github.com/acd421/php), unverified by us). That is precisely
+why php2shell's memory-corruption path — which needs no application surface at all — was
+required for stock-WP RCE.
+
 One triage-relevant property: **`display_errors=Off` incidentally closes this chain's leak
 channel** (leaving DoS-only impact) but is *not* a mitigation — see
 [why](#why-display_errorson-is-required-and-why-off-is-not-a-mitigation).

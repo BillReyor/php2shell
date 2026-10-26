@@ -163,3 +163,9 @@ content as attacker-controlled output.
   defeat any control in §1.1–§1.2, §2 or §3.
 - Legitimate large uploads (media imports) can trip size-based rules; tune thresholds to
   your real upload maxima rather than blanket-blocking multipart.
+- **Patching closes this chain family, not every PHP bug.** Third-party research reports
+  other surviving classes (e.g. a var_destroy re-entry UAF and session-handling gaps that
+  reportedly reach RCE on patched builds) — but they require an application-level
+  pre-auth unserialize / session-decode surface plus a usable gadget class. Stock WordPress
+  core exposes neither, so these do not apply to the stock-WP target class this document is
+  written for; non-WP mod_php apps may.
