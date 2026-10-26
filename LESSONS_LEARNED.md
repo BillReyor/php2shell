@@ -215,6 +215,18 @@ the patch changes, and detection guidance.
   nearly all small allocations; interpose the whole family or your ground truth is blind.
 - **The 8.5.12 patch** adds early session-globals clearing at `MULTIPART_EVENT_START` and aborts
   parsing at max_input_vars overflow — stage 1 of this chain dies immediately on it (no leak).
+- **The leak channel requires `display_errors=On` — and Off is not a mitigation.** The arming
+  request's session-cookie send must fail on "headers already sent" so that
+  `php_session_reset_id()` returns *before* clearing `PS(send_cookie)`; only the displayed
+  `max_input_vars` warning produces early output. With `display_errors=Off`, A's own cookie is
+  sent successfully, the flag is cleared, and B has no leak channel at all — verified on an
+  Off-target replica: the dangling UAF state still exists (the save handler rejects the garbage
+  sid in its log), but nothing reaches the client; arming returns `HTTP/1.0 500` +
+  `Connection: close`. An exhaustive enumeration of alternative channels (mod_files sid
+  validation, trans-SID rewriting, userland session functions, create_sid output — all gated or
+  random) found no stock-config path, and an independent second opinion concurred. Off-target
+  impact is DoS-only; patching remains the only fix. Detection: alert on `Set-Cookie` values
+  outside the sid alphabet.
 - **Adjacent vulnerable versions share geometry — but not always calibration.** The php-src
   diffs between 8.5.9/8.5.10/8.5.11 are clean in everything that shapes this chain (zend
   allocator, RFC1867 parsing, session struct layouts), and HTDATA/HTDATA_EXT carried over

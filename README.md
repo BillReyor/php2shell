@@ -3,9 +3,13 @@
 Demonstration and reproduction kit for **full unauthenticated remote code execution**
 against a stock WordPress site running **PHP 8.5.x x86_64** under Apache prefork +
 mod_php, with ASLR enabled — via CVE-2026-109618 / CVE-2026-109619 (the "php2shell"
-memory-safety bugs in PHP core's RFC 1867 multipart path). Version profiles are
-shipped for **8.5.9, 8.5.10 and 8.5.11**; the target's version is auto-detected from
-`X-Powered-By` (override with `--version`).
+memory-safety bugs in PHP core's RFC 1867 multipart path). Profiles are shipped for
+the **entire vulnerable 8.5 series (8.5.0 – 8.5.11)** — 8.5.9/8.5.10/8.5.11 were
+behaviorally validated to RCE on replicas of their builds; the remaining profiles
+carry nm-derived offsets plus series-wide geometry from php-src tag diffs and are
+unvalidated until stages 1–2 (which are self-validating) pass against a candidate
+target. The target's version is auto-detected from `X-Powered-By` (override with
+`--version`).
 
 The chain was executed against an authorized live target on PHP 8.5.11 and succeeded
 on the first cycle, every stage on attempt 1 (~33 s end-to-end; proof:
@@ -22,7 +26,8 @@ The chain is calibrated for one specific environment. All of the following must 
 
 | Requirement | Why it matters |
 |---|---|
-| **PHP 8.5.x, x86_64** — profiles shipped: 8.5.9, 8.5.10, 8.5.11 (stock `php:8.5.x-apache` image builds) | libphp offsets (`ZIF`, `DTOR`) are nm-derived per build; a different build fails safely at stage 2's dtor gate instead of firing blind. Note `zif_system` is a *local* symbol in these builds — use full `nm`, not just `nm -D` (see the adaptation section) |
+| **PHP 8.5.x, x86_64** — full-series profiles 8.5.0–8.5.11 (stock `php:8.5.x-apache` image builds; .9/.10/.11 validated to RCE here, the rest derived) | libphp offsets (`ZIF`, `DTOR`) are nm-derived per build; a different build fails safely at stage 2's dtor gate instead of firing blind. Note `zif_system` is a *local* symbol in these builds — use full `nm`, not just `nm -D` (see the adaptation section) |
+| **`display_errors=On`** (or equivalent early output) | the leak channel requires the arming request's session-cookie send to fail on "headers already sent" so that `PS(send_cookie)` dangles into the follow-up — with `display_errors=Off` there is no leak and no RCE (DoS only). See [why](#why-display_errorson-is-a-hard-requirement) below |
 | **Apache prefork + mod_php** | RCE depends on the OOM'd worker *surviving* and being reused (PHP-FPM exits the worker → DoS only) |
 | **`memory_limit=128M`** (stock default) | arming size (`HUGE_MB=140`) and pad calibration (`PADS=112`) are tuned to this value; other values need re-calibration (the math is in [LESSONS_LEARNED.md](LESSONS_LEARNED.md)) |
 | **`session.upload_progress.enabled=On`** (default) | the vulnerable handler |
@@ -132,6 +137,43 @@ us its own addresses over HTTP, so no assumptions about kernel layout are needed
   forged destructor. The reclaim alignment is what the `PADS=112` calibration fixes —
   see [LESSONS_LEARNED.md](LESSONS_LEARNED.md) for the slot-grid arithmetic.
 
+### Why display_errors=On is a hard requirement
+
+The leak channel depends on one subtle state transition that only happens when the target
+displays PHP errors to the client. This was verified against source and an Off-target
+replica, so treat it as a fact about this chain rather than a tuning detail:
+
+- During arming, the `max_input_vars` overflow warning is emitted **before** the file part
+  that initializes the session. With `display_errors=On`, that warning writes output
+  mid-parse, which sends the response headers early (`SG(headers_sent)=1`). The session
+  module's subsequent cookie send then fails ("headers already sent") — and
+  `php_session_reset_id()` returns on that failure **before clearing `PS(send_cookie)`**.
+  That flag dangles at 1 into the next request, which is what lets the follow-up emit the
+  forged 4 KB `Set-Cookie` (stages 1–2).
+- With `display_errors=Off`, nothing can produce client-visible output during that window
+  (no userland exists yet; all diagnostics route to the server log), so the arming
+  request's own cookie is sent successfully and `PS(send_cookie)` is cleared. The follow-up
+  then has no leak channel at all: on an Off-target replica we verified that the dangling
+  session state still survives (the UAF is fully present — the save handler even rejects
+  the garbage sid in its log), but no byte of it reaches the client. Empirically, arming
+  against such a target returns `HTTP/1.0 500` + `Connection: close` with an empty body and
+  a normal session cookie; the follow-up gets a clean response with no `Set-Cookie`.
+
+Consequences for triage (consistent with the official advisory's "no complete mitigations"
+stance):
+
+- **`display_errors=Off` is not a mitigation.** The dangling-state bug (CVE-2026-109619) is
+  fully present on Off-targets; only this particular leak channel is closed. Patching remains
+  the only fix. Note that any per-directory `display_errors=On` reachable by the worker
+  re-arms the full chain for arming requests sent to that path — multipart parsing happens
+  during request startup, before script selection matters.
+- **Off-target impact without a leak is DoS-only:** each arming request OOMs its worker (the
+  worker survives and returns 500); on multi-worker targets, parallel arms saturate the pool.
+- **Detection:** alert on `Set-Cookie: PHPSESSID=` values containing bytes outside the
+  session-id alphabet (`[0-9a-f]` for the default `sid_bits_per_character=4`). The leak
+  cannot avoid emitting non-alphabet heap bytes, so this is a clean in-band signature of an
+  active stage-1/2 attempt.
+
 ### How this builds on prior work
 
 - **@9bie** built the original pure-HTTP chain (PHP 8.4.26): the in-band `Set-Cookie`
@@ -160,7 +202,7 @@ What changes per target, and how:
 |---|---|---|
 | `ZIF` / `DTOR` offsets | the **build** (not even the version) | derive from the target binary: `nm -D /usr/lib/apache2/modules/libphp.so \| grep -E 'zif_system\|zval_ptr_dtor'` (or parse the ELF symbol tables; @alvarodh5's original multi-version PoC ships such an auto-derive mode). The stage-2 dtor gate rejects a wrong build before any code runs |
 | Stage 1–2 leaks | version + SAPI | **self-validating**: run them first against any candidate target. A valid clustered heap leak and a gated libphp leak mean the ASLR bypass works on that build, no further assumptions needed |
-| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (LD_PRELOAD interposer); this is the per-version work. Known status: **8.5.11 RCE OK** (this repo, live + lab), **8.5.10 RCE OK** and **8.5.9 RCE OK** (this repo, lab — see worked example below), 8.4.26 RCE OK (@alvarodh5's chain), 8.3.35 leak-only (stage-3 geometry pending), 8.2.34 pending, arm64 partial |
+| Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (LD_PRELOAD interposer); this is the per-version work. Known status: **8.5.11 RCE OK** (this repo, live + lab), **8.5.10 RCE OK** and **8.5.9 RCE OK** (this repo, lab — see worked example below). Profiles for 8.5.0–8.5.8 ship with derived offsets + series-wide geometry but are not behaviorally validated here — run stages 1–2 first. Also: 8.4.26 RCE OK (@alvarodh5's chain), 8.3.35 leak-only (stage-3 geometry pending), 8.2.34 pending, arm64 partial |
 | Arming calibration (`PADS`) | `memory_limit` + arming shape | the dangling slot index must satisfy `k ≡ 6 mod 7`; pad count shifts `k` by a measured constant — scan once per target config (minutes), don't brute-force payloads |
 
 ### Worked example: porting to PHP 8.5.10 (what actually changed)
@@ -245,6 +287,12 @@ is the only safe choice."* Partial stopgaps from the official advisory (none is 
 `post_max_size` for CVE-2026-109618, `session.upload_progress.enabled=0` (and on 8.5,
 `fatal_error_backtraces=0`) for CVE-2026-109619, or rejecting `multipart/form-data` at the
 proxy (breaks uploads).
+
+One configuration property worth knowing for triage: **`display_errors=Off` incidentally
+closes this chain's leak channel** (the arming request's own cookie send then succeeds and
+clears the flag the follow-up needs), leaving DoS-only impact — but it is *not* a
+mitigation, since the underlying dangling-state bug remains fully present. Details and the
+detection signature are in [why display_errors=On is a hard requirement](#why-display_errorson-is-a-hard-requirement).
 
 ## Credits & prior work
 

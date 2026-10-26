@@ -14,8 +14,8 @@ handling — this interposer hooks the full family (63 symbols) plus
 
 ## Files
 
-- `alloc_all.c` — source (recovered from project history; this is the exact code that
-  produced the validated measurements)
+- `alloc_all.c` — source; this is the exact code that
+  produced the validated measurements
 - `alloc_all.so` — compiled binary, x86_64 Linux/glibc (Debian bookworm base), built for
   the official `php:8.5.x-apache` images. md5 `2fb47022208c1be41ee90f0719b5b202`.
 
