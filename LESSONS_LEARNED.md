@@ -215,6 +215,42 @@ the patch changes, and detection guidance.
   nearly all small allocations; interpose the whole family or your ground truth is blind.
 - **The 8.5.12 patch** adds early session-globals clearing at `MULTIPART_EVENT_START` and aborts
   parsing at max_input_vars overflow — stage 1 of this chain dies immediately on it (no leak).
+- **The leak channel requires `display_errors=On` — and Off is not a mitigation.** The arming
+  request's session-cookie send must fail on "headers already sent" so that
+  `php_session_reset_id()` returns *before* clearing `PS(send_cookie)`; only the displayed
+  `max_input_vars` warning produces early output. With `display_errors=Off`, A's own cookie is
+  sent successfully, the flag is cleared, and B has no leak channel at all — verified on an
+  Off-target replica: the dangling UAF state still exists (the save handler rejects the garbage
+  sid in its log), but nothing reaches the client; arming returns `HTTP/1.0 500` +
+  `Connection: close`. An exhaustive enumeration of alternative channels (mod_files sid
+  validation, trans-SID rewriting, userland session functions, create_sid output — all gated or
+  random) found no stock-config path, and an independent second opinion concurred. Off-target
+  impact is DoS-only; patching remains the only fix. Detection: alert on `Set-Cookie` values
+  outside the sid alphabet.
+- **Adjacent vulnerable versions share geometry — but not always calibration.** The php-src
+  diffs between 8.5.9/8.5.10/8.5.11 are clean in everything that shapes this chain (zend
+  allocator, RFC1867 parsing, session struct layouts), and HTDATA/HTDATA_EXT carried over
+  unchanged across all three. But the .9→.10 patch release changed unrelated RINIT-time heap
+  consumption enough to shift the OOM landing point by one bin-3 slot: on 8.5.9 the dangling
+  reference sits at k≡5 mod 7 (dead) where .10/.11 sit at k≡6, and stage 3 misses silently.
+  Porting cost is therefore two nm lookups + one replica + a stage-3 smoke test; if it misses,
+  one interposer measurement of the reference slot index gives the exact pad fix (each pad
+  shifts k by +4). Never assume calibration transfers — verify behaviorally.
+- **`ps_globals` is an exported symbol in libphp** (`nm | grep " ps_globals$"`) — the
+  interposer's PS-tracking offset re-derives with one nm lookup per build (8.5.11: 0x01771a40,
+  8.5.9: 0x01770a40). No code archaeology needed.
+- **Never compare leak/interposer values across an apache restart.** The address-space layout
+  rolls with the master process; a stage-2 "wrong pointer" that turned out to be correct was
+  simply measured in a different post-restart layout. Re-measure both sides in the same run.
+- **`zif_system` is a local symbol** in the official `php:8.5.x-apache` image builds (lowercase
+  `t`); only full `nm` finds it, not `nm -D`. Expect the same for other internal Zend functions.
+- **Lab architecture must be pinned.** On Apple Silicon, Docker/OrbStack defaults to aarch64;
+  x86_64 exploit labs need `--platform linux/amd64` explicitly. A native-ARM container runs the
+  app fine and masks the mismatch until an x86_64 binary (e.g. an LD_PRELOAD interposer) must load
+  inside it — and glibc 2.41 reports a wrong-machine preload as "cannot open shared object file"
+  even though strace shows `openat` succeeding (the ELF machine check fails afterwards).
+- **Docker regenerates `/etc/hosts` on every restart**, wiping manual entries; use
+  `--add-host name:ip` at creation for cross-container resolution that survives.
 
 ## Operational & ethical notes
 
