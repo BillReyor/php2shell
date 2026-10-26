@@ -27,7 +27,10 @@ parsed in PHP core before application code runs. The arming upload **must** exce
 `memory_limit` to trigger the OOM — that size requirement is structural and cannot be
 shrunk without re-engineering the whole chain. A successful leak **must** emit an oversized
 `Set-Cookie`. Evasion (`--evasive`) only randomizes cosmetic per-request fingerprints; it
-cannot touch these two facts, the server-side log trail, or process-level effects.
+cannot touch these two facts, the server-side log trail, or process-level effects. TLS
+transport changes none of this for a defender with visibility into decrypted traffic
+(reverse proxy, eBPF on socket buffers) — it only raises the bar against passive network
+capture.
 
 ## 1. Network-layer signatures
 

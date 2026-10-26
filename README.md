@@ -58,8 +58,11 @@ Expected output on a matching target (~30 s):
 | `--version X.Y.Z` | pin a version profile instead of auto-detecting from `X-Powered-By` (needed when `exposed_php_version=Off`) |
 | `--evasive` | randomize per-request fingerprints to break static/behavioral clustering — see [Evasion & detection](#evasion--detection) |
 
-A timestamped log is written to the current directory. There is deliberately no default
-target: `-u` is required, and you should only point it at systems you are authorized to test.
+`http://` and `https://` URLs both work — TLS is transparent to this chain (validated
+on an Apache-native-TLS replica, both carrier types; cert verification off by default,
+SNI set). A timestamped log is written to the current directory. There is deliberately no
+default target: `-u` is required, and you should only point it at systems you are authorized
+to test.
 
 ## How it works
 
