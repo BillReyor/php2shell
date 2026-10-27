@@ -61,6 +61,14 @@ Credit where credit is due — in order of how directly they enabled this work.
   ~128 MB arming). Corroborates the finding that client-visible error output during arming is what
   opens the leak channel.
 
+- **acd421** — [github.com/acd421/php](https://github.com/acd421/php) ("php2shell-zeros", 2026-10-24):
+  independent analysis of the session gaps that survive the October patch. Their `zero1_session_gaps`
+  work identified the rfc1867 session-write surface still live on 8.5.12 and their patch-scope teardown
+  corroborated our own source analysis; this project's CVE-2026-115560 reproduction (the `--cve115560`
+  mode, full RCE on stock 8.5.12) builds directly on that line of work — including a correction to
+  their "T3 ALL-STOCK" receipt: their victim app used `php_serialize`, so the serialize-handler mismatch
+  is a hard requirement for this class, not an incidental lab detail.
+
 ## Development of this project
 
 - **Qwen3.8 27B Abliterated by HuiHui** — AI research assistant (running in LM Studio

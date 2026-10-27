@@ -1,4 +1,4 @@
-# Detecting php2shell exploitation attempts (CVE-2026-109618 / CVE-2026-109619)
+# Detecting php2shell exploitation attempts (CVE-2026-109618 / CVE-2026-109619 / CVE-2026-115560)
 
 Defensive companion to this repository. The exploit chain here is HTTP-only and leaves
 multiple independent traces; no single signal is required — the signatures below are
@@ -8,10 +8,12 @@ the target build, including runs with `--evasive` enabled.
 
 ## TL;DR for defenders
 
-1. **Patch.** Fixed in 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 (shipped 2026-10-21). The PHP
-   security team states there are no complete mitigations; `display_errors=Off` closes this
-   chain's leak channel but is *not* a mitigation (the dangling-state bug remains, DoS-only
-   residual).
+1. **Patch.** CVE-2026-109618/109619 are fixed in 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35
+   (shipped 2026-10-21). The PHP security team states there are no complete mitigations;
+   `display_errors=Off` closes this chain's leak channel but is *not* a mitigation (the
+   dangling-state bug remains, DoS-only residual). **Note: the third flaw in the same feature,
+   CVE-2026-115560 (§4), is NOT fixed by that patch** — it needs the handler-mismatch
+   configuration and, until patched, `session.upload_progress.enabled=0` plus a config audit.
 2. **If you cannot patch immediately**, the two strongest signals — both immune to
    `--evasive` — are:
    - an oversized / non-alphabetic `Set-Cookie: PHPSESSID=` in responses (§1.2), and
@@ -211,9 +213,56 @@ distinct server-side state that persists until Apache restarts:
   means restarting Apache (a graceful restart suffices — it exits all workers). Until then,
 every rfc1867 request to a wedged sid consumes another worker permanently. After recovery,
 delete the oversized `sess_*` files and re-wedge protection is back to square one: patching
-  (§4) is still the only complete fix.
+  (§5) is still the only complete fix.
 
-## 4. Recommended layered stack
+## 4. CVE-2026-115560 (session handler mismatch) — separate signature set
+
+The third flaw in session-upload-progress (unpatched as of 8.5.12; see README, "CVE-2026-115560
+mode") has a different shape from the chain above: no OOM, no oversized cookies, no arming flood —
+one small multipart upload that never completes, plus one ordinary page request. Its signatures are
+correspondingly different:
+
+**a) Network: an abandoned large multipart body + a session-decoding follow-up.** The attack's
+upload declares a multi-MB `Content-Length` but transmits only the first ~512 KB, then holds the
+connection open without completing the body (the upload stays "in progress", which is what keeps
+the poisoned session state on disk). Seconds later the same client issues an ordinary request
+carrying a `PHPSESSID` cookie to a page that decodes sessions. Correlation rule: **multipart POST
+containing `PHP_SESSION_UPLOAD_PROGRESS` + a file part whose transmitted body stops far short of
+the declared Content-Length with the connection held open, followed within seconds by a same-client
+request using a PHPSESSID cookie** ⇒ active CVE-2026-115560 attempt. This is behavioral — it
+depends on no header set, boundary content, or SID value.
+
+**b) Server log: the decode-failure warning (reader side).** The reader request produces:
+`PHP Warning: session_start(): Failed to decode session object. Session has been destroyed in <file> on line <n>` —
+with `display_errors=On` it also appears in the response body. Alone it is not proof of attack
+(any corrupted session file triggers it); correlated with (a) from the same client within seconds,
+it confirms a poisoned state was decoded — i.e., the gadget's magic methods ran.
+
+**c) Server log: the invalid-key warning (wipe variant).** Where the save path goes through the
+"php" handler encoder, PHP rejects the pipe-bearing key:
+`PHP Warning: Failed to write session data. Data contains invalid key "upload_progress_…|…" in Unknown on line 0`
+— and writes an EMPTY session (the victim's state is wiped). The `upload_progress_` prefix with an
+embedded pipe inside a quoted key is a distinctive string no legitimate traffic produces.
+
+**d) Filesystem: poisoned session files.** A `/tmp/sess_*` file whose content contains an rfc1867
+progress key with an embedded pipe followed by serialized object/array syntax — e.g. matching
+`upload_progress_[^|\"]*\|[aO]:\{`. Legitimate progress entries are flat int/bool/string arrays and never
+contain pipes or `O:`/`a:` markers in the key. Presence of such a file = the write side succeeded;
+whether RCE follows depends on classes available to the decoding page.
+
+**e) Gadget side effects.** Whatever the injected class does in the reader context: shell spawns
+(§3a), file writes (§3b), or application-specific behavior. There is no php2shell-specific artifact
+beyond these — this is ordinary object injection, and detection should be treated as such.
+
+**f) Proactive config audit.** The whole class requires a serialize-handler mismatch: some path
+configured with `session.serialize_handler=php_serialize|php_binary` (per-dir `php_value`,
+`.htaccess`, vhost), or an app that switches handlers at runtime via `ini_set()` before
+`session_start()`. Grep your Apache configs and every `.htaccess`/`.user.ini` for
+`serialize_handler`; if any path uses a non-default handler while others use the default, this
+class is exploitable on that host. Until a patch ships, PHP's own recommendation is
+`session.upload_progress.enabled=0`, which kills the write side of all three flaws.
+
+## 5. Recommended layered stack
 
 | Layer | Control | Catches |
 |---|---|---|
@@ -226,8 +275,10 @@ delete the oversized `sess_*` files and re-wedge protection is back to square on
 | Process/filesystem monitoring (§3c) | `/proc/locks` FLOCK holder+waiter chains on `sess_*`; session files >~10 MB; OOM alloc tracking file growth | DoS wedge (display_errors-independent), pre- and post-outage |
 | Header-consistency rules (§1.5a) | browser UA without `Sec-Fetch-*`/`Accept-Encoding` ⇒ synthetic client | `--evasive` requests precisely, evasion-proof against the tool as written |
 | TLS fingerprinting at edge/proxy (§1.5b) | JA3/JA4 ClientHello matching no real browser behind a browser UA (Python/OpenSSL stack) | `--evasive` over HTTPS; fires pre-HTTP, before any payload inspection |
+| Config audit (§4f) | grep Apache configs/`.htaccess` for non-default `session.serialize_handler`; set `session.upload_progress.enabled=0` until patched | CVE-2026-115560 exposure (unpatched as of 8.5.12), pre-exploitation |
+| Log correlation (§4a+b) | abandoned multipart body + same-client PHPSESSID follow-up; decode-failure warning within seconds | CVE-2026-115560 attempts, evasion-proof (behavioral) |
 
-## 5. Honest limitations
+## 6. Honest limitations
 
 - A single arming request, viewed alone, resembles a large upload; **correlation** (size +
   session fields + follow-up behavior) is what makes the network signature reliable.

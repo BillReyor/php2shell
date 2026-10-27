@@ -189,6 +189,59 @@ Operational notes:
   secondary ZendMM-corruption failure mode kill orphan-holding workers one by one — slower).
 - Detection signatures for defenders are in [DETECTION.md](DETECTION.md) (§3c).
 
+## CVE-2026-115560 mode (session handler mismatch)
+
+`--cve115560` exploits a **third flaw in the same session-upload-progress feature**,
+officially unpatched as of 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 (PHP's informational
+advisory, 2026-10-23; Red Hat RHSB-2026-013). Unlike the chain above it needs **no heap
+leak and no version profile** — it is config-driven: the rfc1867 progress key is
+attacker-chosen, lands *inside* a serialized session file written by the
+`php_serialize`/`php_binary` encoder (which has no pipe-in-key check), and when a page
+decodes that file with the default `php` handler — whose format splits at the first
+`|` — everything after our embedded pipe is unserialized: an object is constructed
+(`__wakeup`) and destroyed on the decode-failure cleanup (`__destruct`). Validated
+end-to-end in-lab against stock **8.5.12** (the patched build for the CVEs above): full
+RCE, proof artifact verified black-box.
+
+```bash
+python3 exploit.py -u http://<authorized-target>/ \
+    --cve115560 \
+    --upload-path /upload/index.php \      # script under the php_serialize dir (a bare echo suffices)
+    --session-page /upload/prefs.php \     # page there that calls session_start() -> victim sid
+    --reader-path /profile.php \           # page OUTSIDE it, default handler, calls session_start()
+    --payload 'a:1:{i:0;O:4:"RceG":0:{}}' \  # serialized gadget (must exist in the READER's context)
+    --proof-path /pwned --expect "uid="     # optional black-box RCE confirmation
+```
+
+**Target prerequisites — this is NOT stock WordPress config.** The target must carry a
+serialize-handler mismatch: some path configured with per-dir/vhost
+`session.serialize_handler=php_serialize|php_binary` (or the official advisory's runtime
+`ini_set()` switch variant) plus any default-handler page that calls `session_start()`. WP
+core sets no such override, so stock WordPress is out of scope for this mode; apps with the
+misconfiguration are in scope on any PHP release with rfc1867. Note our reproduction shows
+the static per-dir mismatch works without any runtime switching — a broader practical surface
+than the advisory's wording implies.
+
+Operational notes:
+
+- **The gadget is target-specific.** `--payload` must name a class that exists in the
+  *reader page's* context with exploitable magic methods (`__wakeup`/`__destruct` or a chain
+  through them). The default payload instantiates a zero-property demo class for lab use; on a
+  real target you do standard object-injection gadget research against the app/vendor code.
+- **Single-reader rule.** A failed decode *wipes* the poisoned state (empty re-save at
+  shutdown), so the tool fires exactly one reader request and never retries. If your first
+  attempt misses, re-arm from scratch.
+- **Size constraints.** The declared upload must stay under `post_max_size` (stock 8M —
+  default is 4 MB) or PHP aborts parsing mid-stream and cleans up before the reader fires;
+  only the first 512 KB is ever transmitted, so the upload stays "in progress" for as long
+  as the socket is open.
+- **Victim session content must not contain a `|`** before our key — the decoder splits at
+  the *first* pipe in the file. Fresh sessions (harvested by the tool) are usually clean;
+  check when reusing a known `--sid`.
+- Verification: with `--proof-path`/`--expect` the tool confirms RCE black-box; without them,
+  the decode-failure warning in the reader response (needs `display_errors=On`) is reported
+  as delivery evidence. Detection signatures for defenders are in [DETECTION.md](DETECTION.md) (§4).
+
 ## Evasion & detection
 
 `--evasive` randomizes per-request fingerprints that honeypots/WAFs use to cluster this attack
@@ -233,7 +286,10 @@ the complete playbook is in [LESSONS_LEARNED.md](LESSONS_LEARNED.md).
 WordPress target (cycle 1, ~33 s) and a long-command extended-carrier run against it; an
 **evasive-mode live run**; lab reproductions of **every release 8.5.0–8.5.11** (full-series sweep
 plus the clean 8.5.3 re-run after this repo's cookie-decode fix); the **patched-build control** on
-8.5.12 (no leak — the official fix closes it); and an **HTTPS/TLS validation**.
+8.5.12 (no leak — the official fix closes the CVE-2026-109618/19 class; note that the unpatched
+CVE-2026-115560 remains, see below); a **CVE-2026-115560 RCE on stock 8.5.12** via the
+`--cve115560` mode (the unpatched third flaw in session-upload-progress); and an **HTTPS/TLS
+validation**.
 
 ## Patch status & mitigations
 
@@ -247,6 +303,16 @@ for CVE-2026-109619, or rejecting `multipart/form-data` at the proxy (breaks upl
 One triage-relevant property: **`display_errors=Off` incidentally closes this chain's leak
 channel** (leaving DoS-only impact) but is *not* a mitigation — see
 [why](#why-display_errorson-is-required-and-why-off-is-not-a-mitigation).
+
+**Scope note — CVE-2026-115560 is NOT fixed by the October patch.** The releases above close
+CVE-2026-109618/109619 (the class this tool's main chain exploits), but a third flaw in the
+same session-upload-progress feature — CVE-2026-115560, object injection via serialize-handler
+mismatch — remains **unpatched as of 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35** (PHP's informational
+advisory of 2026-10-23; Red Hat RHSB-2026-013). It requires the handler-mismatch configuration
+described in [the mode section](#cve-2026-115560-mode-session-handler-mismatch) — not stock
+WordPress config — and PHP rates it "unlikely in practice". Until a full advisory/patch ships,
+PHP's own recommendation is `session.upload_progress.enabled=0`; defenders should also audit for
+per-dir/vhost `session.serialize_handler` overrides (see [DETECTION.md](DETECTION.md) §4).
 
 ## Credits & prior work
 
@@ -270,3 +336,5 @@ proof commands (`id>p`), and remove proof files afterwards unless the owner want
 - @alvarodh5 — foundation single-file PoC (MIT); full attribution in [CREDITS.md](CREDITS.md)
 - [VulnCheck analysis](https://www.vulncheck.com/blog/php2shell-vulnerabilities) · [CrowdStrike: obstacles to weaponizing php2shell](https://www.crowdstrike.com/en-us/blog/obstacles-to-weaponizing-php2shell-likely-constrain-exploitation/)
 - [KillaBoi/StealMyBitcoin-PoC](https://github.com/KillaBoi/StealMyBitcoin-PoC) — independent live exploitation (PHP 8.4.26 cli-server, CTF); corroborates the `display_errors` requirement for the leak channel
+- [PHP informational advisory: Session upload progress (CVE-2026-115560)](https://www.php.net/archive/2026.php) — 23 Oct 2026; unpatched third flaw in session-upload-progress, `session.upload_progress.enabled=0` recommended until the next release
+- [Red Hat RHSB-2026-013](https://access.redhat.com/security/vulnerabilities/RHSB-2026-013) — tracks CVE-2026-109618 / -109619 / -115560 together
