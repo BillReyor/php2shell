@@ -67,7 +67,10 @@ Credit where credit is due — in order of how directly they enabled this work.
   corroborated our own source analysis; this project's CVE-2026-115560 reproduction (the `--cve115560`
   mode, full RCE on stock 8.5.12) builds directly on that line of work — including a correction to
   their "T3 ALL-STOCK" receipt: their victim app used `php_serialize`, so the serialize-handler mismatch
-  is a hard requirement for this class, not an incidental lab detail.
+  is a hard requirement for this class, not an incidental lab detail. The stock WordPress reproduction
+  package in [`evidence/cve-2026-115560/`](evidence/cve-2026-115560/) (a minimal victim plugin embodying that
+  hard requirement, plus `run_demo.sh`) extends the analysis into a reproducible end-to-end demonstration
+  on the patched release.
 
 ## Development of this project
 
@@ -75,7 +78,8 @@ Credit where credit is due — in order of how directly they enabled this work.
   Bionic): the exploit development across this effort — source-level mechanism decoding,
   interposer-based allocator ground truth, slot-grid calibration (`pads=112`), keep-alive
 targeting design and validation, extended-carrier measurement, authorized live-target
-  execution, and this repository's documentation.
+  execution, the CVE-2026-115560 reproduction (the `--cve115560` mode) and its stock WordPress
+  victim-plugin demo (`evidence/cve-2026-115560/`), and this repository's documentation.
 ## Disclaimer
 
 All code here is for **lawful, authorized** security assessment, research and education only.
