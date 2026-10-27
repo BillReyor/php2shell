@@ -12,27 +12,10 @@ on attempt 1. Fixed in **8.5.12**. Every profile self-validates through stages 1
 checks with build gates) before stage 3 can run, so a mismatched build fails safely instead
 of firing blind. The chain is HTTP-only: no debugger, no `/proc`, no binary blobs.
 
-(8.5.3 initially appeared leak-only; that was a bug in this repo's cookie parser, not PHP —
-see the PROFILES comment and `parse_cookie`.)
-
-## Target requirements
-
-The chain is calibrated for one specific environment — all rows must match:
-
-| Requirement | Why it matters |
-|---|---|
-| **PHP 8.5.x x86_64** (stock `php:8.5.x-apache` builds; every release validated to RCE) | libphp offsets are nm-derived per build and were gate-validated against each real build in the series sweep; a mismatched build fails at stage 2's dtor gate instead of firing blind |
-| **`display_errors=On`** (or equivalent early output) | required for the leak channel — with `Off`, no leak and no RCE (DoS only). [Why](#why-display_errorson-is-required-and-why-off-is-not-a-mitigation) |
-| **Apache prefork + mod_php** | RCE needs the OOM'd worker to survive and be reused; PHP-FPM exits it (DoS only) |
-| **`memory_limit=128M`** (stock default) | arming size and pad calibration are tuned to this value; other values need re-calibration ([LESSONS_LEARNED.md](LESSONS_LEARNED.md)) |
-| **`session.upload_progress.enabled=On`** (default) | the vulnerable handler |
-| docroot writable by `www-data` (stock WP) | default proof writes `/p` into the docroot; otherwise use `-c 'id>/tmp/x'` + SSH read, or a callback |
-
-WordPress was the demonstrated application stack, but the trigger fires in PHP core
-**before any application code runs** — any mod_php app works. WordPress matters for two
-practical reasons: its stock `.htaccess` serves existing files directly (so `GET /p` is a
-clean proof), and its background activity (wp-cron, bots) is what the keep-alive targeting
-pins out.
+**Contents:** [Quick start](#quick-start) · [Target requirements](#target-requirements) ·
+[How it works](#how-it-works) · [DoS mode](#dos-mode-when-rce-is-unavailable) ·
+[Evasion & detection](#evasion--detection) · [Porting to other versions](#porting-to-other-versions) ·
+[Evidence](#evidence) · [Patch status](#patch-status--mitigations) · [Credits](#credits--prior-work)
 
 ## Quick start
 
@@ -61,11 +44,28 @@ Expected output on a matching target (~30 s):
 | `--saturate N` | after confirming a wedge, fire N additional probes to exhaust `MaxRequestWorkers` (full outage); 0 = off |
 | `--no-dos` | disable the automatic DoS fallback when RCE is unavailable (stage-1 no-leak / unsupported version) |
 
-`http://` and `https://` URLs both work — TLS is transparent to this chain (validated
-on an Apache-native-TLS replica, both carrier types; cert verification off by default,
-SNI set). A timestamped log is written to the current directory. There is deliberately no
-default target: `-u` is required, and you should only point it at systems you are authorized
-to test.
+`http://` and `https://` URLs both work — TLS is transparent to this chain (validated on an
+Apache-native-TLS replica, both carrier types; cert verification off by default, SNI set). A
+timestamped log is written to the current directory. There is deliberately no default target:
+`-u` is required, and you should only point it at systems you are authorized to test.
+
+## Target requirements
+
+The chain is calibrated for one specific environment — all rows must match:
+
+| Requirement | Why it matters |
+|---|---|
+| **PHP 8.5.x x86_64** (stock `php:8.5.x-apache` builds; every release validated to RCE) | libphp offsets are nm-derived per build and were gate-validated against each real build in the series sweep; a mismatched build fails at stage 2's dtor gate instead of firing blind |
+| **`display_errors=On`** (or equivalent early output) | required for the leak channel — with `Off`, no leak and no RCE (DoS only). [Why](#why-display_errorson-is-required-and-why-off-is-not-a-mitigation) |
+| **Apache prefork + mod_php** | RCE needs the OOM'd worker to survive and be reused; PHP-FPM exits it (DoS only) |
+| **`memory_limit=128M`** (stock default) | arming size and pad calibration are tuned to this value; other values need re-calibration ([LESSONS_LEARNED.md](LESSONS_LEARNED.md)) |
+| **`session.upload_progress.enabled=On`** (default) | the vulnerable handler |
+| docroot writable by `www-data` (stock WP) | default proof writes `/p` into the docroot; otherwise use `-c 'id>/tmp/x'` + SSH read, or a callback |
+
+WordPress was the demonstrated application stack, but the trigger fires in PHP core **before
+any application code runs** — any mod_php app works. WordPress matters for two practical
+reasons: its stock `.htaccess` serves existing files directly (so `GET /p` is a clean proof),
+and its background activity (wp-cron, bots) is what the keep-alive targeting pins out.
 
 ## How it works
 
@@ -85,80 +85,70 @@ Three stages, each a `multipart/form-data` POST parsed by PHP core before applic
 ### Defeating ASLR in-band
 
 ASLR randomizes two things we need: where the Zend memory-manager arena lives, and where
-`libphp.so` is mapped. Both are defeated **in-band** — the target discloses its own
-addresses over HTTP, so no kernel-layout assumptions are needed:
+`libphp.so` is mapped. Both are defeated **in-band** — the target discloses its own addresses
+over HTTP, so no kernel-layout assumptions are needed:
 
-- **Stage 1 → heap base.** The OOM arming interrupts request setup with the session-ID
-  string freed but still referenced (`PS(id)` dangles). A crafted field in the follow-up
-  overwrites that freed string's header — rewriting its length to `0x1000` and marking it
-  valid — so when PHP emits `Set-Cookie: PHPSESSID=…`, it copies **4 KB of live heap** into
-  the cookie. The leaked bytes contain many pointers; counting their 2 MB-aligned values
-  (`v & ~0x1FFFFF`) and taking the densest cluster yields the arena base. Range filtering +
-  clustering is what makes this kernel-independent: it works wherever ASLR put the heap.
-- **Stage 2 → libphp base.** Arming with a different fill size shifts where the OOM lands,
-  so that a specific HashTable allocation overlaps the dangling region; its `pDestructor`
-  field is a **libphp code pointer** (`zval_ptr_dtor`) and rides out in the same cookie. The
-  leak must pass a page-offset gate — `(ptr & 0xfff) == (DTOR & 0xfff)` against the expected
-  build — before anything proceeds; a mismatched build fails here instead of firing blind,
-  and a match gives `libphp_base = ptr − DTOR`.
-- **One leak covers all workers.** Prefork children fork from the same parent, so every
-  worker shares an identical address-space layout: bases leaked on any connection are valid
-  for every worker — which is what lets stage 3 run on a different keep-alive-pinned worker.
-- **Stage 3** then needs no further leaks: with both bases known it computes absolute
-  addresses (`zif_system`, the carrier slot) and reclaims the dangling reference so request
-  shutdown calls `system(cmd)` through the forged destructor. The reclaim alignment is what
-  the `PADS` calibration fixes — see [LESSONS_LEARNED.md](LESSONS_LEARNED.md) for the slot-grid arithmetic.
+- **Stage 1 → heap base.** The OOM arming interrupts request setup with the session-ID string
+  freed but still referenced (`PS(id)` dangles). A crafted field in the follow-up overwrites
+  that freed string's header — rewriting its length to `0x1000` and marking it valid — so when
+  PHP emits `Set-Cookie: PHPSESSID=…`, it copies **4 KB of live heap** into the cookie. The
+  leaked bytes contain many pointers; counting their 2 MB-aligned values (`v & ~0x1FFFFF`) and
+  taking the densest cluster yields the arena base. Range filtering + clustering is what makes
+  this kernel-independent: it works wherever ASLR put the heap.
+- **Stage 2 → libphp base.** Arming with a different fill size shifts where the OOM lands, so
+  that a specific HashTable allocation overlaps the dangling region; its `pDestructor` field is
+  a **libphp code pointer** (`zval_ptr_dtor`) and rides out in the same cookie. The leak must
+  pass a page-offset gate — `(ptr & 0xfff) == (DTOR & 0xfff)` against the expected build —
+  before anything proceeds; a mismatched build fails here instead of firing blind, and a match
+  gives `libphp_base = ptr − DTOR`.
+- **One leak covers all workers.** Prefork children fork from the same parent, so every worker
+  shares an identical address-space layout: bases leaked on any connection are valid for every
+  worker — which is what lets stage 3 run on a different keep-alive-pinned worker.
+- **Stage 3** then needs no further leaks: with both bases known it computes absolute addresses
+  (`zif_system`, the carrier slot) and reclaims the dangling reference so request shutdown calls
+  `system(cmd)` through the forged destructor. The reclaim alignment is what the `PADS`
+  calibration fixes — see [LESSONS_LEARNED.md](LESSONS_LEARNED.md) for the slot-grid arithmetic.
 
 Two engineering pieces make this reliable in the wild (details + calibration math in
-[LESSONS_LEARNED.md](LESSONS_LEARNED.md)): **keep-alive arm→follow-up targeting** — each
-stage opens one persistent connection, arms over it and sends its follow-up on the same
-socket; prefork binds a keep-alive connection to a single child, so the armed worker is
-guaranteed to process the exploit and stays busy for the whole cycle (wp-cron/bots cannot
-clear the armed state mid-cycle); and **chunked-transfer arming** — `Transfer-Encoding:
-chunked` bypasses `post_max_size` entirely and stops sending at the first response byte,
-keeping the post-OOM connection in sync. Commands longer than 14 bytes use an extended
-carrier with its own calibrated offset (`HTDATA_EXT`, measured with the LD_PRELOAD
-interposer in [`tools/interposer/`](tools/interposer/)) plus a marker write so success stays
-provable black-box.
+[LESSONS_LEARNED.md](LESSONS_LEARNED.md)): **keep-alive arm→follow-up targeting** — each stage
+opens one persistent connection, arms over it and sends its follow-up on the same socket;
+prefork binds a keep-alive connection to a single child, so the armed worker is guaranteed to
+process the exploit and stays busy for the whole cycle (wp-cron/bots cannot clear the armed
+state mid-cycle); and **chunked-transfer arming** — `Transfer-Encoding: chunked` bypasses
+`post_max_size` entirely and stops sending at the first response byte, keeping the post-OOM
+connection in sync. Commands longer than 14 bytes use an extended carrier with its own
+calibrated offset (`HTDATA_EXT`, measured with the LD_PRELOAD interposer in
+[`tools/interposer/`](tools/interposer/)) plus a marker write so success stays provable black-box.
 
-The request bodies and stage-3 forged-frame geometry derive from @alvarodh5's single-file
-PoC (MIT; [CREDITS.md](CREDITS.md)), inlined here with attribution; this repo adds the
-stock-config calibration, keep-alive live targeting, black-box proof, long-command support,
-and `--evasive`.
+### Why `display_errors=On` is required — and why Off is not a mitigation
 
-### Why display_errors=On is required — and why Off is not a mitigation
+The leak channel depends on one state transition that only happens when PHP displays errors to
+the client (verified against source and an Off-target replica):
 
-The leak channel depends on one state transition that only happens when PHP displays errors
-to the client (verified against source and an Off-target replica):
-
-- During arming, the `max_input_vars` overflow warning is emitted **before** the file part
-  that initializes the session. With `display_errors=On`, that warning writes output
-  mid-parse, sending response headers early; the session module's subsequent cookie send
-  then fails ("headers already sent") and `php_session_reset_id()` returns on that failure
-  **without clearing `PS(send_cookie)`**. That flag dangles into the next request — which is
-  what lets the follow-up emit the forged 4 KB `Set-Cookie` (stages 1–2).
-- With `display_errors=Off`, nothing can produce client-visible output in that window, so
-  the arming request's own cookie sends successfully and clears the flag. The dangling state
-  still survives (the UAF is fully present — verified on an Off-target replica), but no byte
-  of it reaches the client: arming returns `HTTP/1.0 500` + `Connection: close`, and the
-  follow-up gets a clean response with no `Set-Cookie`.
+- During arming, the `max_input_vars` overflow warning is emitted **before** the file part that
+  initializes the session. With `display_errors=On`, that warning writes output mid-parse,
+  sending response headers early; the session module's subsequent cookie send then fails
+  ("headers already sent") and `php_session_reset_id()` returns on that failure **without
+  clearing `PS(send_cookie)`**. That flag dangles into the next request — which is what lets the
+  follow-up emit the forged 4 KB `Set-Cookie` (stages 1–2).
+- With `display_errors=Off`, nothing can produce client-visible output in that window, so the
+  arming request's own cookie sends successfully and clears the flag. The dangling state still
+  survives (the UAF is fully present — verified on an Off-target replica), but no byte of it
+  reaches the client: arming returns `HTTP/1.0 500` + `Connection: close`, and the follow-up
+  gets a clean response with no `Set-Cookie`.
 
 Consequences for triage (consistent with the advisory's "no complete mitigations" stance):
 
-- **`display_errors=Off` is not a mitigation** — the dangling-state bug remains fully
-  present; only this leak channel is closed. Patching is the only fix. Any per-directory
-  `display_errors=On` reachable by the worker re-arms the full chain (multipart parsing
-  happens during request startup, before script selection matters).
-- **Off-target impact without a leak is still severe — and it's now in this tool.** The same
-  rfc1867 surface drives a pre-auth, display_errors-INDEPENDENT availability attack: uploads
-  with oversized progress keys accumulate ~4 MB entries per request in the target's session
-  file until an encode OOM orphans a `flock` that PHP can never release again; every later
-  rfc1867 request to that sid then consumes one Apache worker forever, and parallel sids
-  saturate `MaxRequestWorkers` = full outage. Run it with `--dos` (or let the tool fall back
-  automatically when RCE is unavailable) — see [DoS mode](#dos-mode-when-rce-is-unavailable).
-- **Detection:** alert on `Set-Cookie: PHPSESSID=` values containing bytes outside the
-  session-id alphabet (`[0-9a-f]` at default `sid_bits_per_character=4`) — a clean in-band
-  signature of an active stage-1/2 attempt. Full guidance: [DETECTION.md](DETECTION.md).
+- **`display_errors=Off` is not a mitigation** — the dangling-state bug remains fully present;
+  only this leak channel is closed. Patching is the only fix. Any per-directory
+  `display_errors=On` reachable by the worker re-arms the full chain (multipart parsing happens
+  during request startup, before script selection matters).
+- **Off-target impact without a leak is still severe** — the same rfc1867 surface drives a
+  pre-auth, display_errors-independent availability attack; see [DoS mode](#dos-mode-when-rce-is-unavailable)
+  (the tool falls back to it automatically when RCE is unavailable).
+- **Detection:** alert on `Set-Cookie: PHPSESSID=` values containing bytes outside the session-id
+  alphabet (`[0-9a-f]` at default `sid_bits_per_character=4`) — a clean in-band signature of an
+  active stage-1/2 attempt. Full guidance: [DETECTION.md](DETECTION.md).
 
 ## DoS mode (when RCE is unavailable)
 
@@ -195,44 +185,26 @@ Operational notes:
   responds normally, the tool tells you to raise it. Non-stock `post_max_size`/`session.save_path`
   setups may need tuning.
 - **Impact is permanent until restart.** Treat this mode like any destructive test: authorized
-targets only, and expect to ask the operator for an Apache restart afterward (or let the
+  targets only, and expect to ask the operator for an Apache restart afterward (or let the
   secondary ZendMM-corruption failure mode kill orphan-holding workers one by one — slower).
 - Detection signatures for defenders are in [DETECTION.md](DETECTION.md) (§3c).
 
-### How this builds on prior work
-
-- **@9bie** built the original pure-HTTP chain (PHP 8.4.26): the in-band `Set-Cookie` leaks
-  plus a `zif_system` reclaim and worker-pinning techniques — the concept that made x64 +
-  ASLR exploitable at all.
-- **@dinosn** published the PHP 8.5.11 dangling-reference reclaim geometry the 8.5 stage 3
-  is based on.
-- **@alvarodh5** (MIT) unified this into a single-file, multi-version PoC — the direct
-  foundation of this repo; its leak stages and forged-frame code are inlined here with
-  attribution. His lab used `memory_limit=16M` and a pinned worker; **his stage 3 did not
-  work against stock config**, for an allocator reason no public write-up documented.
-- **This project** closed that gap: source-level decoding of the failure (a one-slot
-  misalignment in the Zend-MM slot grid, fixed by `k ≡ 6 mod 7` + the pad-count knob),
-  keep-alive targeting that replaces worker pinning and survives WordPress background
-  traffic, chunked-TE arming for stock `post_max_size`, black-box proof design, the extended
-  carrier, a patched-build control proving the official fix closes it, and `--evasive`.
-
 ## Evasion & detection
 
-`--evasive` randomizes per-request fingerprints that honeypots/WAFs use to cluster this
-attack family (fixed decoded-body hashes, absent User-Agent, repeated boundaries, consistent
-header order): multipart boundary **content** at identical lengths, browser-like headers with
-rotating order, UA-bearing preflight GETs, and the `PHPSESSID` field **value** in stage-1/2
-follow-ups — random content at a fixed length (the value is stored by PHP without validation
-and never becomes the live session id, so only its *length* matters to the exploit). All of
-these are layout-neutral — validated end-to-end in-lab and live (2026-10-26), including both
-carrier types on 8.5.3 and 8.5.11 with randomized SIDs. What it deliberately does **not**
-change: field names (numeric names register as integer hash keys; stringifying them perturbs
-the calibrated heap pattern and kills the leak), part counts/sizes, or anything structural.
+`--evasive` randomizes per-request fingerprints that honeypots/WAFs use to cluster this attack
+family (fixed decoded-body hashes, absent User-Agent, repeated boundaries, consistent header
+order): multipart boundary **content** at identical lengths, browser-like headers with rotating
+order, UA-bearing preflight GETs, and the `PHPSESSID` field **value** in stage-1/2 follow-ups —
+random content at a fixed length (the value is stored by PHP without validation and never becomes
+the live session id, so only its *length* matters to the exploit). All of these are layout-neutral
+— validated end-to-end in-lab and live (2026-10-26), including both carrier types on 8.5.3 and
+8.5.11 with randomized SIDs. What it deliberately does **not** change: field names (numeric names
+register as integer hash keys; stringifying them perturbs the calibrated heap pattern and kills
+the leak), part counts/sizes, or anything structural.
 
-Evasion cannot hide what the exploit *is*: a >`memory_limit` chunked multipart upload that
-OOMs the worker, followed by an oversized `Set-Cookie`. Defenders: see
-[DETECTION.md](DETECTION.md) for network, log and process-level signatures — including ones
-that work regardless of `--evasive`.
+Evasion cannot hide what the exploit *is*: a >`memory_limit` chunked multipart upload that OOMs
+the worker, followed by an oversized `Set-Cookie`. Defenders: see [DETECTION.md](DETECTION.md) for
+network, log and process-level signatures — including ones that work regardless of `--evasive`.
 
 ## Porting to other versions
 
@@ -243,52 +215,34 @@ that work regardless of `--evasive`.
 | Stage-3 geometry (`HTDATA`, frame layout) | version (struct layouts) + config | decode from php-src at the exact tag with allocator ground truth (interposer). Status: **every release in the vulnerable series RCE-OK** (this repo, cycle 1); 8.4.26 RCE OK (@alvarodh5's chain) |
 | Arming calibration (`PADS`) | `memory_limit` + arming shape | the dangling slot index must satisfy `k ≡ 6 mod 7`; pad count shifts `k` by a measured constant — scan once per target config (minutes), don't brute-force payloads |
 
-**Worked data points.** Porting to **8.5.10** cost exactly two nm lookups: the php-src diff
-was clean in everything that shapes this chain, offsets were re-derived from the replica's
-own `libphp.so`, and with *unchanged* `HTDATA`/`PADS` both carriers RCE'd on cycle 1. Porting
-to **8.5.9** added one twist: unrelated RINIT-time heap consumption shifted where the OOM
-lands by one bin-3 slot, moving the dangling reference from k=76 (≡ 6, aligned) to
-**k=75 (≡ 5 — geometrically dead)**; a two-pad bump (`PADS=114` → k=83 ≡ 6) fixed it with
-geometry unchanged. So the honest net cost for an adjacent version is: **two nm lookups + one
-replica + a stage-3 smoke test** — and if that misses, one interposer measurement of
-`k mod 7` tells you exactly which pad count to try. Versions further apart (8.4.x, 8.3.x)
-need the full diff-and-decode path; the complete playbook is in
-[LESSONS_LEARNED.md](LESSONS_LEARNED.md).
+**Worked data points.** Porting to **8.5.10** cost exactly two nm lookups: the php-src diff was
+clean in everything that shapes this chain, offsets were re-derived from the replica's own
+`libphp.so`, and with *unchanged* `HTDATA`/`PADS` both carriers RCE'd on cycle 1. Porting to
+**8.5.9** added one twist: unrelated RINIT-time heap consumption shifted where the OOM lands by
+one bin-3 slot, moving the dangling reference from k=76 (≡ 6, aligned) to **k=75 (≡ 5 —
+geometrically dead)**; a two-pad bump (`PADS=114` → k=83 ≡ 6) fixed it with geometry unchanged.
+So the honest net cost for an adjacent version is: **two nm lookups + one replica + a stage-3
+smoke test** — and if that misses, one interposer measurement of `k mod 7` tells you exactly
+which pad count to try. Versions further apart (8.4.x, 8.3.x) need the full diff-and-decode path;
+the complete playbook is in [LESSONS_LEARNED.md](LESSONS_LEARNED.md).
 
 ## Evidence
 
-[`evidence/`](evidence/) contains sanitized logs (target IP redacted):
-
-- **the live run** — full chain against an authorized WordPress target, PHP 8.5.11 x86_64:
-  cycle 1, every stage attempt 1, ~33 s; `GET /p` → `uid=33(www-data) …`;
-- **the evasive-mode live run** (`live_run_20261026_075500.log`) — full chain with `--evasive`
-  against the same authorized target (PHP 8.5.11): cycle 1, every stage attempt 1; proves the
-  randomized-fingerprint variant works end-to-end in the wild;
-- **the 8.5.10 lab reproduction** — full chain against a stock WP replica on PHP 8.5.10:
-  cycle 1, both carrier types (localhost-only by construction);
-- **the 8.5.9 lab reproduction** (`lab_8509_rce.log`) — full chain on PHP 8.5.9 with the
-  re-calibrated `PADS=114`: cycle 1, both carriers; preflight `/p` → 404, post-exploit → 200;
-- **the full-series sweep** (`lab_850_series_sweep.log`) — every release 8.5.0–8.5.8 run
-  against a replica of its stock build (x86_64 + ASLR): stage-1 leak on all nine, gated
-  stage-2 libphp leak and cycle-1 RCE on **all nine** (the earlier "8.5.3 exception" was
-  this repo's cookie-decode bug — `parse_cookie` left PHP's space-as-'+' encoding undecoded;
-  8.5.3 is the only release whose dtor offset ends in 0x20, so it alone was affected);
-- **the clean 8.5.3 re-run** (`lab_853_rce_clean.log`) — post-fix full chain on a stock
-  8.5.3 replica with no instrumentation: stage-2 `ptr=…5620` (exact `zval_ptr_dtor`, dtor
-  gate OK), RCE cycle 1;
-- **the patched-build control** — same chain against PHP **8.5.12**: no leak on any attempt
-  (8.5.12 also aborts parsing at `max_input_vars` overflow before reaching the OOM field).
-  The official patch closes this RCE.
+[`evidence/`](evidence/) holds sanitized run logs (target IP redacted), indexed per-file in
+[evidence/README.md](evidence/README.md). Highlights: the **live RCE** on the authorized 8.5.11
+WordPress target (cycle 1, ~33 s) and a long-command extended-carrier run against it; an
+**evasive-mode live run**; lab reproductions of **every release 8.5.0–8.5.11** (full-series sweep
+plus the clean 8.5.3 re-run after this repo's cookie-decode fix); the **patched-build control** on
+8.5.12 (no leak — the official fix closes it); and an **HTTPS/TLS validation**.
 
 ## Patch status & mitigations
 
 Fixed in **8.5.12, 8.4.27, 8.3.36, 8.2.35** (plus EOL backports for 7.4/8.0/8.1), shipped
 2026-10-21. The PHP security team: *"There are no complete mitigations, updating is the only
 safe choice."* Partial stopgaps from the official advisory (none is complete; `ini_set()` /
-`.user.ini` are too late — parsing precedes them): `memory_limit=-1` + low `post_max_size`
-for CVE-2026-109618, `session.upload_progress.enabled=0` (and on 8.5,
-`fatal_error_backtraces=0`) for CVE-2026-109619, or rejecting `multipart/form-data` at the
-proxy (breaks uploads).
+`.user.ini` are too late — parsing precedes them): `memory_limit=-1` + low `post_max_size` for
+CVE-2026-109618, `session.upload_progress.enabled=0` (and on 8.5, `fatal_error_backtraces=0`)
+for CVE-2026-109619, or rejecting `multipart/form-data` at the proxy (breaks uploads).
 
 One triage-relevant property: **`display_errors=Off` incidentally closes this chain's leak
 channel** (leaving DoS-only impact) but is *not* a mitigation — see
@@ -296,18 +250,18 @@ channel** (leaving DoS-only impact) but is *not* a mitigation — see
 
 ## Credits & prior work
 
-See [CREDITS.md](CREDITS.md) — this chain stands directly on @alvarodh5's single-file
-ASLR-bypassing RCE (MIT; inlined into `exploit.py` with attribution), which builds on
-@9bie's and @dinosn's public work; discovery of the underlying CVEs is by Calif, OpenAI and
-Wiz.
+This chain builds directly on **@alvarodh5's** single-file, ASLR-bypassing RCE PoC for PHP 8.5.x
+(MIT; the relevant code is inlined into `exploit.py` with attribution), which extends **@9bie's**
+original pure-HTTP 8.4.26 chain and **@dinosn's** reclaim geometry; the underlying CVEs were
+discovered by **Calif, OpenAI and Wiz**. Full credit — including context sources (VulnCheck,
+CrowdStrike) and this project's development — is in [CREDITS.md](CREDITS.md).
 
 ## Disclaimer
 
 For **lawful, authorized** security assessment, research and education only — run it against
-systems you own or have explicit written permission to test. Each arming request OOMs a
-worker (a brief per-request disruption); coordinate with the owner before running, prefer
-non-destructive proof commands (`id>p`), and remove proof files afterwards unless the owner
-wants them kept.
+systems you own or have explicit written permission to test. Each arming request OOMs a worker
+(a brief per-request disruption); coordinate with the owner before running, prefer non-destructive
+proof commands (`id>p`), and remove proof files afterwards unless the owner wants them kept.
 
 ## Sources
 
