@@ -57,6 +57,9 @@ Expected output on a matching target (~30 s):
 | `--cycles N` | stage-3 retry budget (default 3; live runs needed 1) |
 | `--version X.Y.Z` | pin a version profile instead of auto-detecting from `X-Powered-By` (needed when `exposed_php_version=Off`) |
 | `--evasive` | randomize per-request fingerprints to break static/behavioral clustering — see [Evasion & detection](#evasion--detection) |
+| `--dos` | DoS mode only (skip RCE): permanently wedge session file(s) via the encode-OOM flock leak — works even when RCE is unavailable, needs no version profile. See [DoS mode](#dos-mode-when-rce-is-unavailable) |
+| `--saturate N` | after confirming a wedge, fire N additional probes to exhaust `MaxRequestWorkers` (full outage); 0 = off |
+| `--no-dos` | disable the automatic DoS fallback when RCE is unavailable (stage-1 no-leak / unsupported version) |
 
 `http://` and `https://` URLs both work — TLS is transparent to this chain (validated
 on an Apache-native-TLS replica, both carrier types; cert verification off by default,
@@ -146,11 +149,55 @@ Consequences for triage (consistent with the advisory's "no complete mitigations
   present; only this leak channel is closed. Patching is the only fix. Any per-directory
   `display_errors=On` reachable by the worker re-arms the full chain (multipart parsing
   happens during request startup, before script selection matters).
-- **Off-target impact without a leak is DoS-only:** each arming OOMs its worker; parallel
-  arms saturate the pool.
+- **Off-target impact without a leak is still severe — and it's now in this tool.** The same
+  rfc1867 surface drives a pre-auth, display_errors-INDEPENDENT availability attack: uploads
+  with oversized progress keys accumulate ~4 MB entries per request in the target's session
+  file until an encode OOM orphans a `flock` that PHP can never release again; every later
+  rfc1867 request to that sid then consumes one Apache worker forever, and parallel sids
+  saturate `MaxRequestWorkers` = full outage. Run it with `--dos` (or let the tool fall back
+  automatically when RCE is unavailable) — see [DoS mode](#dos-mode-when-rce-is-unavailable).
 - **Detection:** alert on `Set-Cookie: PHPSESSID=` values containing bytes outside the
   session-id alphabet (`[0-9a-f]` at default `sid_bits_per_character=4`) — a clean in-band
   signature of an active stage-1/2 attempt. Full guidance: [DETECTION.md](DETECTION.md).
+
+## DoS mode (when RCE is unavailable)
+
+`--dos` runs the availability attack described above instead of the RCE chain. It needs no
+version profile and works regardless of `display_errors`; it also runs automatically when the
+default flow can't get a stage-1 leak (e.g. `display_errors=Off`) or detects an unsupported
+PHP version — pass `--no-dos` to keep the old fail-only behavior.
+
+```bash
+python3 exploit.py -u http://<authorized-target>/index.php --dos            # wedge 1 sid + confirm
+python3 exploit.py -u ... --dos --saturate 200                             # full outage (exhaust workers)
+```
+
+How it works, in one paragraph: an rfc1867 upload whose `PHP_SESSION_UPLOAD_PROGRESS` value is
+a ~4 MB string registers a session variable *named* after that string — so each request plants
+one ~4.2 MB entry in the target's own session file (written mid-parse by PHP's progress-flush,
+which also adopts your attacker-chosen `PHPSESSID`). After ~8 entries (~35 MB, stock
+`memory_limit=128M`) the next request dies inside `php_session_encode()` with the session fd
+still open and `flock(LOCK_EX)`-held; module shutdown is skipped on that path, so the lock is
+orphaned — a later RINIT nulls the struct without closing the leaked fd, and PHP code can never
+release it again. Every subsequent rfc1867 request to that sid blocks forever in `flock()`
+(self-deadlock if the same worker, cross-process otherwise), permanently consuming one Apache
+worker per request; parallel sids exhaust `MaxRequestWorkers` = full outage. Recovery requires
+an Apache restart, and the attacker re-wedges a sid in ~30 s.
+
+Operational notes:
+
+- **Confirmation costs one worker.** Black-box confirmation is "a minimal rfc1867 probe to that
+  sid hangs" — and that probe's worker stays consumed. `--probes N` adds more (each = one more
+  dead worker); `--saturate N` fires N fire-and-forget probes round-robin across wedged sids
+  and then polls `GET /` until the target stops responding.
+- **Calibration.** The default arm count (`--dos-arms 9`) is calibrated for stock
+  `memory_limit=128M`. Scale it proportionally for larger limits; if the confirmation probe
+  responds normally, the tool tells you to raise it. Non-stock `post_max_size`/`session.save_path`
+  setups may need tuning.
+- **Impact is permanent until restart.** Treat this mode like any destructive test: authorized
+targets only, and expect to ask the operator for an Apache restart afterward (or let the
+  secondary ZendMM-corruption failure mode kill orphan-holding workers one by one — slower).
+- Detection signatures for defenders are in [DETECTION.md](DETECTION.md) (§3c).
 
 ### How this builds on prior work
 

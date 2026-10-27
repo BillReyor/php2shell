@@ -88,7 +88,9 @@ catches attempts against *any* public PoC variant of this family, not just this 
 | **Oversized `Set-Cookie` on success** | emitted by PHP | **unchanged — it is the leak** | ✅ cookie rule still work |
 
 Practical consequence: static body-hash clustering (the technique used in public honeypot
-reports) is defeated; **structural, size-based and response-side rules are not.**
+reports) is defeated; **structural, size-based and response-side rules are not** — and the
+evasive impersonation itself introduces new tells that don't exist without `--evasive`
+(§1.5).
 
 ### 1.4 Access-log response-size oracle (lab-measured example)
 
@@ -97,6 +99,47 @@ On the lab replica (stock config), access-log byte counts cleanly separate outco
 session cookie; a 232 B `"OK"` body = multipart not parsed at all. Exact numbers vary per
 build, but the *technique* — alerting on response-size anomalies correlated with preceding
 >memory_limit requests from the same client — is portable and requires no payload knowledge.
+
+### 1.5 Evasive-mode tells: the browser impersonation is incomplete
+
+`--evasive` tries to pass as browser traffic and does it badly — it introduces tells that
+do not exist in non-evasive mode, and each one is a precise detector for exactly the
+requests that think they are hiding:
+
+**a) UA↔header inconsistency (works with or without TLS).** The evasive requests claim
+Chrome 126 / Firefox 127 / Safari 17 User-Agents but send only `User-Agent`, `Accept` and
+`Accept-Language`. A real browser's multipart POST also carries, at minimum:
+`Accept-Encoding: gzip, deflate, br[, zstd]` (always present on real browsers — absent
+here), the `Sec-Fetch-Site/Mode/Dest/User` quartet, `sec-ch-ua*` Client Hints, and usually
+`Origin`/`Referer` for a form POST. The rule **"claims a modern browser UA but has no
+`Sec-Fetch-*` and no `Accept-Encoding`"** flags every evasive request (arming AND the
+preflight/proof GETs, which have the same gap) and almost nothing legitimate — it is as
+reliable as the structural rules in §1.1–§1.2.
+
+**b) TLS fingerprint vs UA mismatch (HTTPS targets; the strongest catch).** The tool's
+`_connect()` wraps with stock `ssl.create_default_context()`, producing a Python/OpenSSL
+JA3/JA4 ClientHello that matches no real browser — and `--evasive` never randomizes it.
+On HTTPS targets you get a **browser UA riding on a Python TLS stack**: the mismatch fires
+on the first packet, before any HTTP is even parsed, and is evasion-proof against this
+tool as written (it has no TLS mimicry). If you have a TLS-terminating proxy or JA4
+logging at the edge, this alone identifies the client.
+
+**c) Unterminated chunked uploads.** The arming upload stops sending chunks the moment the
+OOM response arrives and **never sends the `0\r\n\r\n` terminator**; the server sees a large
+chunked POST abandoned mid-body, immediately followed by another request on the same
+keep-alive socket. "Chunked body truncated / follow-up request after an incomplete
+terminated transfer" is a behavioral signature independent of headers, boundary content or
+SID — add it alongside the §1.1 size rule.
+
+**d) Boundary shape.** Beyond fixed length (§1.3), the *format* is wrong for a browser:
+evasive boundaries are bare `[A-Za-z0-9]{10}` / `{17}` with no dashes, while real browsers
+use recognizable prefixes (Chromium: `----WebKitFormBoundary` + 16 chars; Firefox: a long
+dash run + digits). A multipart boundary with **no dashes at that exact short length** is
+anomalous regardless of content randomization.
+
+Net: the evasion-proof structural, log and process layers (§1.1–§1.2, §2, §3) remain the
+foundation; layer (a) and (b) on top and `--evasive` has no clean path — its impersonation
+is detectable even where every other fingerprint was randomized.
 
 ## 2. Server-log indicators (immune to `--evasive`)
 
@@ -141,6 +184,35 @@ small proof files (`p`, `pp`, `r`, …) into the web root as `www-data`. Filesys
 corresponding application write** is a cheap, high-signal tripwire; treat any such file's
 content as attacker-controlled output.
 
+**c) The flock wedge (DoS mode — display_errors-independent).** The DoS variant leaves a
+distinct server-side state that persists until Apache restarts:
+
+- **Workers blocked in `flock()` on session files.** A worker stuck for more than a few
+  seconds with wchan `locks_lock_inode_wait` (or, where `/proc/PID/wchan` is unreadable,
+  listed as a waiter in `/proc/locks`) holding an fd to `/tmp/sess_*` is wedged. The wedge's
+  signature shape: **one holder pid + a growing chain of waiter pids on the same inode** —
+  and in the self-deadlock case the *same* pid appears as both holder and waiter (two open
+  fds to one session file). Check:
+  ```bash
+  cat /proc/locks | grep FLOCK          # holder + waiters per inode
+  ls -la /tmp/sess_*                    # which files are involved
+  ps -eo pid,wchan,args | grep apache2  # who is stuck (where wchan works)
+  ```
+- **Oversized session files.** Legitimate `mod_files` sessions are small; a `/tmp/sess_*`
+  file growing past ~10–30 MB (the DoS arms plant ~4.2 MB entries per request) is an active
+  or completed wedge attempt. Alert on size, and note the mtime pattern: growth in ~2 s
+  steps of ~4.2 MB.
+- **The threshold fatal's allocation size.** The arming OOMs already appear in §2; the DoS
+  variant's *last* one is distinctive: `tried to allocate <N> bytes` where `<N>` ≈ current
+  session-file size + one ~4.2 MB entry (the encode output that never got written). Correlate
+  an OOM-in-Unknown whose alloc size tracks a growing `/tmp/sess_*` file ⇒ DoS arming in
+  progress, wedge imminent.
+- **Recovery.** Killing the orphan-holding worker(s) releases their locks; in practice this
+  means restarting Apache (a graceful restart suffices — it exits all workers). Until then,
+every rfc1867 request to a wedged sid consumes another worker permanently. After recovery,
+delete the oversized `sess_*` files and re-wedge protection is back to square one: patching
+  (§4) is still the only complete fix.
+
 ## 4. Recommended layered stack
 
 | Layer | Control | Catches |
@@ -151,6 +223,9 @@ content as attacker-controlled output.
 | Log monitoring | §2 correlation rule (OOM-in-Unknown + session warnings, same client, seconds) | attempts on Off-targets where no cookie is emitted |
 | Runtime (eBPF/Tetragon or auditd) | Apache-child → `/bin/sh` execve alert with argv capture | RCE execution, evasion-proof |
 | Filesystem monitoring | new www-data files in docroot without app writes | proof artifacts / post-exploitation file drops |
+| Process/filesystem monitoring (§3c) | `/proc/locks` FLOCK holder+waiter chains on `sess_*`; session files >~10 MB; OOM alloc tracking file growth | DoS wedge (display_errors-independent), pre- and post-outage |
+| Header-consistency rules (§1.5a) | browser UA without `Sec-Fetch-*`/`Accept-Encoding` ⇒ synthetic client | `--evasive` requests precisely, evasion-proof against the tool as written |
+| TLS fingerprinting at edge/proxy (§1.5b) | JA3/JA4 ClientHello matching no real browser behind a browser UA (Python/OpenSSL stack) | `--evasive` over HTTPS; fires pre-HTTP, before any payload inspection |
 
 ## 5. Honest limitations
 
@@ -160,6 +235,8 @@ content as attacker-controlled output.
   and an attacker who never reaches stage 3 leaves just OOM log lines (indistinguishable
   from a memory bug without the session-warning correlation).
 - `--evasive` defeats static body-hash clustering and UA/order heuristics; it does not
-  defeat any control in §1.1–§1.2, §2 or §3.
+  defeat any control in §1.1–§1.5, §2 or §3 — and its browser impersonation is itself a
+  tell (§1.5): the incomplete header set and the Python TLS fingerprint identify exactly
+  the requests that randomized everything else.
 - Legitimate large uploads (media imports) can trip size-based rules; tune thresholds to
   your real upload maxima rather than blanket-blocking multipart.
