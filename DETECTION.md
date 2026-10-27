@@ -141,6 +141,35 @@ small proof files (`p`, `pp`, `r`, …) into the web root as `www-data`. Filesys
 corresponding application write** is a cheap, high-signal tripwire; treat any such file's
 content as attacker-controlled output.
 
+**c) The flock wedge (DoS mode — display_errors-independent).** The DoS variant leaves a
+distinct server-side state that persists until Apache restarts:
+
+- **Workers blocked in `flock()` on session files.** A worker stuck for more than a few
+  seconds with wchan `locks_lock_inode_wait` (or, where `/proc/PID/wchan` is unreadable,
+  listed as a waiter in `/proc/locks`) holding an fd to `/tmp/sess_*` is wedged. The wedge's
+  signature shape: **one holder pid + a growing chain of waiter pids on the same inode** —
+  and in the self-deadlock case the *same* pid appears as both holder and waiter (two open
+  fds to one session file). Check:
+  ```bash
+  cat /proc/locks | grep FLOCK          # holder + waiters per inode
+  ls -la /tmp/sess_*                    # which files are involved
+  ps -eo pid,wchan,args | grep apache2  # who is stuck (where wchan works)
+  ```
+- **Oversized session files.** Legitimate `mod_files` sessions are small; a `/tmp/sess_*`
+  file growing past ~10–30 MB (the DoS arms plant ~4.2 MB entries per request) is an active
+  or completed wedge attempt. Alert on size, and note the mtime pattern: growth in ~2 s
+  steps of ~4.2 MB.
+- **The threshold fatal's allocation size.** The arming OOMs already appear in §2; the DoS
+  variant's *last* one is distinctive: `tried to allocate <N> bytes` where `<N>` ≈ current
+  session-file size + one ~4.2 MB entry (the encode output that never got written). Correlate
+  an OOM-in-Unknown whose alloc size tracks a growing `/tmp/sess_*` file ⇒ DoS arming in
+  progress, wedge imminent.
+- **Recovery.** Killing the orphan-holding worker(s) releases their locks; in practice this
+  means restarting Apache (a graceful restart suffices — it exits all workers). Until then,
+every rfc1867 request to a wedged sid consumes another worker permanently. After recovery,
+delete the oversized `sess_*` files and re-wedge protection is back to square one: patching
+  (§4) is still the only complete fix.
+
 ## 4. Recommended layered stack
 
 | Layer | Control | Catches |
@@ -151,6 +180,7 @@ content as attacker-controlled output.
 | Log monitoring | §2 correlation rule (OOM-in-Unknown + session warnings, same client, seconds) | attempts on Off-targets where no cookie is emitted |
 | Runtime (eBPF/Tetragon or auditd) | Apache-child → `/bin/sh` execve alert with argv capture | RCE execution, evasion-proof |
 | Filesystem monitoring | new www-data files in docroot without app writes | proof artifacts / post-exploitation file drops |
+| Process/filesystem monitoring (§3c) | `/proc/locks` FLOCK holder+waiter chains on `sess_*`; session files >~10 MB; OOM alloc tracking file growth | DoS wedge (display_errors-independent), pre- and post-outage |
 
 ## 5. Honest limitations
 
