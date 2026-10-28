@@ -201,7 +201,10 @@ decodes that file with the default `php` handler — whose format splits at the 
 `|` — everything after our embedded pipe is unserialized: an object is constructed
 (`__wakeup`) and destroyed on the decode-failure cleanup (`__destruct`). Validated
 end-to-end in-lab against stock **8.5.12** (the patched build for the CVEs above): full
-RCE, proof artifact verified black-box.
+RCE, proof artifact verified black-box. A complete one-command reproduction on **stock
+WordPress** (`wordpress:php8.5-apache` = PHP 8.5.12) — a minimal victim plugin embodying
+the handler-mismatch prerequisites plus `run_demo.sh`, which builds the environment and runs
+this mode end-to-end — is in [`evidence/cve-2026-115560/`](evidence/cve-2026-115560/).
 
 ```bash
 python3 exploit.py -u http://<authorized-target>/ \
@@ -288,8 +291,9 @@ WordPress target (cycle 1, ~33 s) and a long-command extended-carrier run agains
 plus the clean 8.5.3 re-run after this repo's cookie-decode fix); the **patched-build control** on
 8.5.12 (no leak — the official fix closes the CVE-2026-109618/19 class; note that the unpatched
 CVE-2026-115560 remains, see below); a **CVE-2026-115560 RCE on stock 8.5.12** via the
-`--cve115560` mode (the unpatched third flaw in session-upload-progress); and an **HTTPS/TLS
-validation**.
+`--cve115560` mode (the unpatched third flaw in session-upload-progress), including a
+one-command **stock WordPress reproduction package** ([evidence/cve-2026-115560/](evidence/cve-2026-115560/) —
+victim plugin + `run_demo.sh`); and an **HTTPS/TLS validation**.
 
 ## Patch status & mitigations
 

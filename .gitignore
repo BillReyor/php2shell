@@ -9,3 +9,5 @@ __pycache__/
 # Run logs written by exploit.py into the repo root when run from a clone
 # (evidence/ holds curated, sanitized logs and is NOT ignored)
 /live_run_*.log
+# ...except where run_demo.sh runs exploit.py inside the evidence package dir
+evidence/cve-2026-115560/live_run_*.log
